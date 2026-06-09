@@ -1,0 +1,114 @@
+"""Tests for the langchain middleware shim.
+
+Covers the lazy/optional import behavior, plus a smoke test of the actual hooks
+against a stub ``AgentMiddleware`` base (so a missing/renamed hook is caught here
+rather than at runtime).
+"""
+
+from __future__ import annotations
+
+import importlib
+import sys
+import types
+
+import pytest
+
+from langmigrate.core.engine import MigrationEngine
+from langmigrate.core.migration import BaseMigration
+from langmigrate.core.registry import MigrationRegistry
+
+
+def test_module_imports_without_langchain():
+    # Importing the module must not require langchain.
+    mod = importlib.import_module("langmigrate.integrations.langchain")
+    assert hasattr(mod, "__getattr__")
+
+
+def test_unknown_attribute_raises_attributeerror():
+    mod = importlib.import_module("langmigrate.integrations.langchain")
+    with pytest.raises(AttributeError):
+        _ = mod.DoesNotExist
+
+
+def test_middleware_access_requires_langchain():
+    mod = importlib.import_module("langmigrate.integrations.langchain")
+    langchain_installed = importlib.util.find_spec("langchain") is not None
+    if langchain_installed:
+        assert mod.SchemaMigrationMiddleware is not None
+    else:
+        with pytest.raises(ImportError, match="langchain"):
+            _ = mod.SchemaMigrationMiddleware
+
+
+# --- smoke test of the actual hooks against a stub AgentMiddleware base ------
+
+
+class _V1(BaseMigration):
+    revision = "v1"
+    down_revision = None
+
+    def upgrade(self, state):
+        return self.add_field(state, "context", default={})
+
+    def downgrade(self, state):
+        return self.drop_field(state, "context")
+
+
+class _V2(BaseMigration):
+    revision = "v2"
+    down_revision = "v1"
+
+    def upgrade(self, state):
+        return self.rename_field(state, "msgs", "messages")
+
+    def downgrade(self, state):
+        return self.rename_field(state, "messages", "msgs")
+
+
+@pytest.fixture
+def stub_langchain(monkeypatch):
+    """Inject a stub ``langchain.agents.middleware.AgentMiddleware`` into sys.modules."""
+
+    class AgentMiddleware:
+        def __init__(self, *a, **k):
+            pass
+
+    langchain = types.ModuleType("langchain")
+    agents = types.ModuleType("langchain.agents")
+    middleware = types.ModuleType("langchain.agents.middleware")
+    middleware.AgentMiddleware = AgentMiddleware
+    monkeypatch.setitem(sys.modules, "langchain", langchain)
+    monkeypatch.setitem(sys.modules, "langchain.agents", agents)
+    monkeypatch.setitem(sys.modules, "langchain.agents.middleware", middleware)
+    return AgentMiddleware
+
+
+def _engine():
+    return MigrationEngine(MigrationRegistry.from_migrations([_V1(), _V2()]))
+
+
+def test_middleware_builds_and_all_hooks_migrate(stub_langchain):
+    mod = importlib.import_module("langmigrate.integrations.langchain")
+    cls = mod.SchemaMigrationMiddleware
+    # All four hooks must exist (this is what would silently break at runtime).
+    for hook in ("before_agent", "before_model", "abefore_agent", "abefore_model"):
+        assert hasattr(cls, hook)
+
+    mw = cls(_engine())
+    legacy = {"msgs": ["hi"], "count": 1}
+    update = mw.before_agent(dict(legacy))
+    assert update["messages"] == ["hi"]
+    assert update["context"] == {}
+    assert update["langmigrate_rev"] == "v2"
+
+    # Idempotent: a state already at head yields no update.
+    current = {"messages": ["hi"], "count": 1, "context": {}, "langmigrate_rev": "v2"}
+    assert mw.before_model(current) is None
+
+
+async def test_middleware_async_hooks_migrate(stub_langchain):
+    mod = importlib.import_module("langmigrate.integrations.langchain")
+    mw = mod.SchemaMigrationMiddleware(_engine())
+    update = await mw.abefore_agent({"msgs": ["hi"], "count": 1})
+    assert update["messages"] == ["hi"]
+    assert update["langmigrate_rev"] == "v2"

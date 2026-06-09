@@ -1,0 +1,41 @@
+title: LangMigrate
+description: Declarative schema migrations for LangGraph state persistence.
+baseurl: "/langmigrate"
+url: "https://scinfu.github.io"
+
+theme: just-the-docs
+
+# Navigation
+nav_sort: order
+
+# Search
+search_enabled: true
+
+# Footer
+footer_content: "LangMigrate — MIT License"
+
+# Callout colours used in the cookbook
+callout_color_default: grey
+callout_opacity: 0.2
+
+# Code copy button
+enable_copy_code_button: true
+
+# Aux links (top-right)
+aux_links:
+  "GitHub":
+    - "https://github.com/scinfu/langmigrate"
+
+aux_links_new_tab: true
+
+# Collections
+collections:
+  docs:
+    permalink: "/:collection/:path/"
+    output: true
+
+# Exclude from build
+exclude:
+  - "*.py"
+  - __pycache__
+  - .venv

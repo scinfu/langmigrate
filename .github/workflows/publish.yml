@@ -1,0 +1,100 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# PyPI trusted publishing requires id-token: write.
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test-before-publish:
+    name: Run full test suite before publish
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: langmigrate
+          POSTGRES_PASSWORD: langmigrate
+          POSTGRES_DB: langmigrate
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U langmigrate"
+          --health-interval 2s --health-timeout 3s --health-retries 15
+      redis:
+        image: redis/redis-stack-server:latest
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s --health-timeout 3s --health-retries 15
+    env:
+      LANGMIGRATE_TEST_PG: postgresql://langmigrate:langmigrate@localhost:5432/langmigrate
+      LANGMIGRATE_TEST_REDIS: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          cache-dependency-glob: "pyproject.toml"
+      - name: Sync (all extras)
+        run: uv sync --extra dev --extra postgres --extra redis --extra langchain
+      - name: Ruff lint
+        run: uv run ruff check src tests
+      - name: Ruff format check
+        run: uv run ruff format --check src tests
+      - name: Type check
+        run: uv run mypy src/langmigrate
+      - name: Unit tests (with coverage)
+        run: uv run pytest -m "not integration" --cov=langmigrate --cov-report=term
+      - name: Integration tests
+        run: uv run pytest -m integration
+
+  build:
+    name: Build sdist and wheel
+    needs: test-before-publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: Build
+        run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  publish:
+    name: Publish to PyPI via trusted publishing
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/langmigrate
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

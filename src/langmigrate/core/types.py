@@ -1,0 +1,152 @@
+"""Core data types shared across LangMigrate.
+
+These types are deliberately backend-agnostic. A :class:`StateEnvelope` is the
+normalized view of a checkpoint that migrations operate on, so migration logic
+never touches a database client or a LangGraph ``Checkpoint`` directly.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+# Key under which the schema revision tag is stored inside ``checkpoint.metadata``.
+REVISION_METADATA_KEY = "langmigrate_rev"
+
+# Sentinel distinguishing "no literal default given" from ``default=None``. Defined
+# here (rather than in ``operations``) so the fluent ``StateEnvelope`` helpers can
+# reference it without importing ``operations`` (which would be a circular import).
+_OPS_UNSET = object()
+
+
+class RevisionMeta(BaseModel):
+    """Identity of a single migration revision within the DAG."""
+
+    revision: str
+    down_revision: str | None = None
+    slug: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    branch_labels: tuple[str, ...] = ()
+
+    model_config = ConfigDict(frozen=True)
+
+
+class StateEnvelope(BaseModel):
+    """Normalized, backend-agnostic view of a checkpoint for migration.
+
+    ``values`` mirrors a checkpoint's ``channel_values`` (the user state). The
+    ``revision`` is the tag read from ``checkpoint.metadata`` and tells the engine
+    where in the DAG this state currently sits. ``node`` is the (optional) node a
+    thread is paused on, used by topology migrations.
+    """
+
+    values: dict[str, Any]
+    revision: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    node: str | None = None
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def with_values(self, values: dict[str, Any]) -> StateEnvelope:
+        """Return a copy carrying ``values`` (functional update; original untouched)."""
+        return self.model_copy(update={"values": values})
+
+    def with_revision(self, revision: str | None) -> StateEnvelope:
+        """Return a copy stamped with ``revision``."""
+        return self.model_copy(update={"revision": revision})
+
+    # -- fluent declarative helpers -----------------------------------------
+    #
+    # These mirror :mod:`langmigrate.core.operations` as methods so inline
+    # (``@migration``) and subclass migrations can write ``state.add_field(...)``.
+    # ``operations`` is imported lazily to avoid a circular import (it depends on
+    # this module). The transforms stay pure and idempotent.
+
+    def add_field(
+        self,
+        name: str,
+        default: Any = _OPS_UNSET,
+        *,
+        factory: Callable[[], Any] | None = None,
+    ) -> StateEnvelope:
+        """Safe: add ``name`` with a default/factory if absent. Idempotent."""
+        from . import operations as ops
+
+        return ops.add_field(self, name, default, factory=factory)
+
+    def drop_field(self, name: str) -> StateEnvelope:
+        """Safe: remove ``name``. No-op if already absent."""
+        from . import operations as ops
+
+        return ops.drop_field(self, name)
+
+    def rename_field(self, old: str, new: str) -> StateEnvelope:
+        """Unsafe: remap key ``old`` -> ``new``. Idempotent."""
+        from . import operations as ops
+
+        return ops.rename_field(self, old, new)
+
+    def coerce_field(
+        self,
+        name: str,
+        fn: Callable[[Any], Any],
+        *,
+        skip_if: Callable[[Any], bool] | None = None,
+    ) -> StateEnvelope:
+        """Unsafe: convert the value of ``name`` via ``fn``. No-op if absent."""
+        from . import operations as ops
+
+        return ops.coerce_field(self, name, fn, skip_if=skip_if)
+
+    def require_field(
+        self,
+        name: str,
+        *,
+        fallback: Any = _OPS_UNSET,
+        factory: Callable[[], Any] | None = None,
+    ) -> StateEnvelope:
+        """Unsafe: assert ``name`` exists, else inject a fallback or block."""
+        from . import operations as ops
+
+        return ops.require_field(
+            self, name, fallback=fallback, factory=factory, revision=self.revision
+        )
+
+
+class OpKind(str, Enum):
+    """Classification of a declarative field operation."""
+
+    ADD = "add"
+    DROP = "drop"
+    RENAME = "rename"
+    COERCE = "coerce"
+    REQUIRE = "require"
+
+
+# Operations classed as safe never lose or reinterpret existing data.
+SAFE_OPS: frozenset[OpKind] = frozenset({OpKind.ADD, OpKind.DROP})
+
+
+class FieldOp(BaseModel):
+    """Declarative description of a single field-level transformation.
+
+    Used to record/inspect what a migration does (e.g. for ``history`` output and
+    future autogenerate support). The actual mutation lives in ``core.operations``.
+    """
+
+    kind: OpKind
+    field: str
+    new_name: str | None = None
+    default: Any = None
+    coerce: Callable[[Any], Any] | None = None
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @property
+    def is_safe(self) -> bool:
+        """Whether this operation cannot lose or reinterpret existing data."""
+        return self.kind in SAFE_OPS

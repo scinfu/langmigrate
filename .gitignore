@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+
+# Virtual env / uv
+.venv/
+venv/
+uv.lock
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+.cursor/
+
+# AI assistant local config
+.claude/
+
+# Project
+langmigrate.toml
+migrations/
+!examples/**/migrations/

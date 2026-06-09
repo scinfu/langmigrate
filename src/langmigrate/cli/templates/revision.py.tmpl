@@ -1,0 +1,25 @@
+"""${message}
+
+Revision ID: ${revision}
+Down revision: ${down_revision}
+Created: ${created}
+"""
+
+from __future__ import annotations
+
+from langmigrate import BaseMigration, StateEnvelope
+
+
+class Migration(BaseMigration):
+    revision = "${revision}"
+    down_revision = ${down_revision_repr}
+    slug = "${slug}"
+
+    def upgrade(self, state: StateEnvelope) -> StateEnvelope:
+        # TODO: implement the upgrade transform, e.g.:
+        #   return self.add_field(state, "new_field", default=None)
+        return state
+
+    def downgrade(self, state: StateEnvelope) -> StateEnvelope:
+        # TODO: implement the reverse transform, or call self.raise_irreversible().
+        return state

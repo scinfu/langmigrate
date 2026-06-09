@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-unit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache-dependency-glob: "pyproject.toml"
+      - name: Sync (dev + langchain extras)
+        run: uv sync --extra dev --extra langchain
+      - name: Ruff lint
+        run: uv run ruff check src tests
+      - name: Ruff format check
+        run: uv run ruff format --check src tests
+      - name: Type check
+        run: uv run mypy src/langmigrate
+      - name: Unit tests (with coverage)
+        run: uv run pytest -m "not integration" --cov=langmigrate --cov-report=term --cov-report=xml
+      - name: Upload coverage artifact
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: langmigrate
+          POSTGRES_PASSWORD: langmigrate
+          POSTGRES_DB: langmigrate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U langmigrate"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis/redis-stack-server:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      LANGMIGRATE_TEST_PG: postgresql://langmigrate:langmigrate@localhost:5432/langmigrate
+      LANGMIGRATE_TEST_REDIS: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          cache-dependency-glob: "pyproject.toml"
+      - name: Sync (all extras)
+        run: uv sync --extra dev --extra postgres --extra redis --extra langchain
+      - name: Integration tests
+        run: uv run pytest -m integration

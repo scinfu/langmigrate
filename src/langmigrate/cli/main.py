@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
+from rich.console import Console
+from rich.table import Table
 
 from ..config import DEFAULT_CONFIG_FILE, DEFAULT_CONFIG_TOML, LangMigrateConfig
 from ..core.engine import HEAD, MigrationEngine
@@ -372,15 +374,29 @@ def _emit_history(registry: MigrationRegistry) -> None:
     if not len(registry):
         typer.echo("(no revisions yet)")
         return
+
+    console = Console()
+    table = Table(box=None, padding=(0, 2))
+    table.add_column("Revision", style="cyan")
+    table.add_column("Parents", style="magenta")
+    table.add_column("Description")
+
     printed: set[str] = set()
-    for head in registry.heads():
+    heads = set(registry.heads())
+    for head in sorted(heads):
         for rev in reversed(registry.lineage(head)):
             if rev in printed:
                 continue
             printed.add(rev)
             mig = registry.get(rev)
-            marker = " (head)" if rev == head else ""
-            typer.echo(f"{rev} <- {_format_parents(mig)}  {mig.slug}{marker}")
+
+            rev_display = rev
+            if rev in heads:
+                rev_display = f"[bold green]{rev} (head)[/bold green]"
+
+            table.add_row(rev_display, _format_parents(mig), mig.slug)
+
+    console.print(table)
 
 
 def _emit_current(registry: MigrationRegistry, adapter) -> None:

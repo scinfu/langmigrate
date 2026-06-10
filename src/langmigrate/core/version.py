@@ -59,3 +59,62 @@ def metadata_for(envelope: StateEnvelope) -> dict[str, Any]:
         meta.pop(REVISION_METADATA_KEY, None)
         return meta
     return stamp_metadata(envelope.metadata, envelope.revision)
+
+
+# -- store items --------------------------------------------------------------
+#
+# Store items have no metadata channel: ``Item.value`` is the only persisted
+# payload, so the revision tag lives under the reserved REVISION_METADATA_KEY
+# *inside the value*. The runtime wrapper injects it on write and strips it from
+# every item it returns, so application code (and migrations) never observe it.
+
+#: Envelope metadata key carrying a store item's namespace tuple.
+ITEM_NAMESPACE_META_KEY = "langmigrate_namespace"
+#: Envelope metadata key carrying a store item's key.
+ITEM_KEY_META_KEY = "langmigrate_key"
+
+
+def read_value_revision(value: dict[str, Any] | None) -> str | None:
+    """Return the revision tag stored inside an item ``value``, or ``None``."""
+    if not value:
+        return None
+    revision = value.get(REVISION_METADATA_KEY)
+    return revision if isinstance(revision, str) else None
+
+
+def stamp_value(value: dict[str, Any], revision: str) -> dict[str, Any]:
+    """Return a copy of ``value`` with the revision tag set to ``revision``."""
+    new_value = dict(value)
+    new_value[REVISION_METADATA_KEY] = revision
+    return new_value
+
+
+def strip_value_tag(value: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``value`` without the revision tag."""
+    new_value = dict(value)
+    new_value.pop(REVISION_METADATA_KEY, None)
+    return new_value
+
+
+def envelope_from_item_parts(
+    value: dict[str, Any], *, namespace: tuple[str, ...], key: str
+) -> StateEnvelope:
+    """Build a :class:`StateEnvelope` from a store item's parts.
+
+    The revision is read from the in-value tag and the tag is stripped from
+    ``values`` so migrations never see it. ``namespace``/``key`` are carried in
+    the envelope metadata (under :data:`ITEM_NAMESPACE_META_KEY` /
+    :data:`ITEM_KEY_META_KEY`) so migrations can dispatch per namespace.
+    """
+    return StateEnvelope(
+        values=strip_value_tag(value),
+        revision=read_value_revision(value),
+        metadata={ITEM_NAMESPACE_META_KEY: namespace, ITEM_KEY_META_KEY: key},
+    )
+
+
+def value_for(envelope: StateEnvelope) -> dict[str, Any]:
+    """Return the envelope's values as a store ``value``, tagged with its revision."""
+    if envelope.revision is None:
+        return strip_value_tag(envelope.values)
+    return stamp_value(envelope.values, envelope.revision)

@@ -18,6 +18,7 @@ from langgraph.checkpoint.base import (
     CheckpointTuple,
 )
 
+from ..core.operations import strict_equal
 from ..core.types import StateEnvelope
 from ..core.version import metadata_for
 
@@ -35,16 +36,12 @@ def reconcile_versions(
     """
     reconciled: dict[str, Any] = {}
     for channel, value in new_values.items():
-        # Mirror ``coerce_field``'s notion of "changed": a value that is ``==`` but
-        # of a different type (e.g. ``1`` -> ``1.0``, ``0`` -> ``False``) is a real
-        # change. Comparing with ``==`` alone would keep the old version, so the
-        # new blob would never be written back and the migration would be silently
-        # lost while the checkpoint is still stamped as migrated.
-        unchanged = (
-            channel in old_values
-            and old_values[channel] == value
-            and type(old_values[channel]) is type(value)
-        )
+        # Mirror ``coerce_field``'s notion of "changed" recursively: a value that
+        # is ``==`` but of a different type at any depth (``1`` -> ``1.0``) is a
+        # real change. Plain ``==`` would keep the old version, so the new blob
+        # would never be written back and the migration would be silently lost
+        # while the checkpoint is still stamped as migrated.
+        unchanged = channel in old_values and strict_equal(old_values[channel], value)
         if unchanged and channel in old_versions:
             reconciled[channel] = old_versions[channel]
         else:
@@ -62,7 +59,11 @@ def changed_versions(old_checkpoint: Checkpoint, new_checkpoint: Checkpoint) -> 
 def build_migrated_tuple(
     tup: CheckpointTuple, migrated: StateEnvelope, saver: BaseCheckpointSaver
 ) -> CheckpointTuple:
-    """Return a new tuple carrying the migrated values, versions and revision tag."""
+    """Return a new tuple carrying the migrated values, versions and revision tag.
+
+    ``pending_writes`` are passed through untouched (single-channel fragments —
+    see the limitation note in :mod:`langmigrate.runtime.interceptor`).
+    """
     checkpoint = tup.checkpoint
     new_checkpoint: Checkpoint = {
         **checkpoint,

@@ -30,6 +30,7 @@ class LangMigrateConfig:
     """Resolved configuration for a LangMigrate project."""
 
     migrations_dir: str = "migrations"
+    store_migrations_dir: str = "store_migrations"
     backend: str = "postgres"
     url: str | None = None
 
@@ -43,6 +44,7 @@ class LangMigrateConfig:
                 data = tomllib.load(fh).get("langmigrate", {})
         cfg = cls(
             migrations_dir=data.get("migrations_dir", "migrations"),
+            store_migrations_dir=data.get("store_migrations_dir", "store_migrations"),
             backend=data.get("backend", "postgres"),
             url=data.get("url"),
         )
@@ -54,11 +56,18 @@ class LangMigrateConfig:
     def migrations_path(self) -> Path:
         return Path(self.migrations_dir)
 
+    @property
+    def store_migrations_path(self) -> Path:
+        return Path(self.store_migrations_dir)
+
 
 DEFAULT_CONFIG_TOML = """\
 [langmigrate]
 # Directory holding revision scripts.
 migrations_dir = "migrations"
+
+# Directory holding store (BaseStore) revision scripts, used by `langmigrate store`.
+# store_migrations_dir = "store_migrations"
 
 # Persistence backend: "postgres" or "redis" (both implemented).
 backend = "postgres"

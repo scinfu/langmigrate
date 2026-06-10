@@ -165,3 +165,102 @@ def test_revision_blocks_on_multiple_heads(tmp_path):
         result = runner.invoke(app, ["revision", "-m", "next"])
     assert result.exit_code == 1
     assert "multiple heads" in result.output.lower()
+
+
+_DUP_A = """
+from langmigrate import BaseMigration
+class A(BaseMigration):
+    revision = "dup1"
+    down_revision = None
+    def upgrade(self, s): return s
+    def downgrade(self, s): return s
+"""
+
+_DUP_B = """
+from langmigrate import BaseMigration
+class B(BaseMigration):
+    revision = "dup1"
+    down_revision = None
+    def upgrade(self, s): return s
+    def downgrade(self, s): return s
+"""
+
+
+def test_registry_errors_render_message_not_traceback(tmp_path):
+    # Two files declaring the same revision id -> DuplicateRevisionError must
+    # surface as a red message + exit 1, not a raw traceback.
+    migs = tmp_path / "migrations"
+    migs.mkdir()
+    (migs / "a.py").write_text(_DUP_A)
+    (migs / "b.py").write_text(_DUP_B)
+    with chdir(tmp_path):
+        for command in (["history"], ["revision", "-m", "next"]):
+            result = runner.invoke(app, command)
+            assert result.exit_code == 1
+            assert "Duplicate revision" in result.output
+            assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_merge_joins_heads_into_single_head(tmp_path):
+    migs = tmp_path / "migrations"
+    migs.mkdir()
+    (migs / "ha.py").write_text(_HEAD_A)
+    (migs / "hb.py").write_text(_HEAD_B)
+    with chdir(tmp_path):
+        # Two heads -> check fails.
+        assert runner.invoke(app, ["check"]).exit_code == 1
+
+        result = runner.invoke(app, ["merge", "-m", "join heads"])
+        assert result.exit_code == 0, result.output
+        assert "merge revision" in result.output.lower()
+
+        # The DAG now has a single head and check passes.
+        chk = runner.invoke(app, ["check"])
+        assert chk.exit_code == 0, chk.output
+
+        hist = runner.invoke(app, ["history"])
+        assert hist.exit_code == 0
+        assert "ha + hb" in hist.output
+
+        # And `revision` chains onto the merge head without complaining.
+        assert runner.invoke(app, ["revision", "-m", "next"]).exit_code == 0
+
+
+def test_merge_with_single_head_exits(tmp_path):
+    migs = tmp_path / "migrations"
+    migs.mkdir()
+    (migs / "ha.py").write_text(_HEAD_A)
+    with chdir(tmp_path):
+        result = runner.invoke(app, ["merge", "-m", "nothing"])
+    assert result.exit_code == 1
+    assert "at least two" in result.output
+
+
+def test_merge_unknown_revision_exits(tmp_path):
+    migs = tmp_path / "migrations"
+    migs.mkdir()
+    (migs / "ha.py").write_text(_HEAD_A)
+    (migs / "hb.py").write_text(_HEAD_B)
+    with chdir(tmp_path):
+        result = runner.invoke(app, ["merge", "ha", "ghost", "-m", "bad"])
+    assert result.exit_code == 1
+    assert "ghost" in result.output
+
+
+def test_merge_rejects_ancestor_descendant_pair(tmp_path):
+    chained = """
+from langmigrate import BaseMigration
+class C(BaseMigration):
+    revision = "hc"
+    down_revision = "ha"
+    def upgrade(self, s): return s
+    def downgrade(self, s): return s
+"""
+    migs = tmp_path / "migrations"
+    migs.mkdir()
+    (migs / "ha.py").write_text(_HEAD_A)
+    (migs / "hc.py").write_text(chained)
+    with chdir(tmp_path):
+        result = runner.invoke(app, ["merge", "ha", "hc", "-m", "bad"])
+    assert result.exit_code == 1
+    assert "descendant" in result.output

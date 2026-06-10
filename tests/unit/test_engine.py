@@ -148,3 +148,95 @@ def test_downgrade_noop_when_already_at_target():
     e = engine()
     state = StateEnvelope(values={"messages": ["hi"], "count": 5, "context": {}}, revision="v2")
     assert e.downgrade_state(state, "v2") is state
+
+
+# -- merge revisions through the engine ---------------------------------------
+
+
+def _mk_merge(revision: str, down_revision, field: str | None = None):
+    from langmigrate.core.migration import BaseMigration
+
+    rev, down, fld = revision, down_revision, field
+
+    class M(BaseMigration):
+        revision = rev
+        down_revision = down
+        slug = rev
+
+        def upgrade(self, state):
+            if fld is None:
+                return state
+            return self.add_field(state, fld, default=True)
+
+        def downgrade(self, state):
+            if fld is None:
+                return state
+            return self.drop_field(state, fld)
+
+    return M()
+
+
+def diamond_engine() -> MigrationEngine:
+    return MigrationEngine(
+        MigrationRegistry.from_migrations(
+            [
+                _mk_merge("base", None, "base_field"),
+                _mk_merge("a", "base", "a_field"),
+                _mk_merge("b", "base", "b_field"),
+                _mk_merge("merge", ("a", "b")),
+            ]
+        )
+    )
+
+
+def test_upgrade_through_merge_applies_both_branches():
+    eng = diamond_engine()
+    state = StateEnvelope(values={}, revision=None)
+
+    out = eng.upgrade_state(state, "head")
+
+    assert out.revision == "merge"
+    assert out.values == {"base_field": True, "a_field": True, "b_field": True}
+
+
+def test_upgrade_from_branch_through_merge():
+    eng = diamond_engine()
+    state = StateEnvelope(values={"base_field": True, "a_field": True}, revision="a")
+
+    out = eng.upgrade_state(state, "head")
+
+    assert out.revision == "merge"
+    assert out.values == {"base_field": True, "a_field": True, "b_field": True}
+
+
+def test_downgrade_through_merge_to_branch():
+    eng = diamond_engine()
+    state = StateEnvelope(
+        values={"base_field": True, "a_field": True, "b_field": True}, revision="merge"
+    )
+
+    out = eng.downgrade_state(state, "a")
+
+    # merge and b undone; final revision stamped once at the end.
+    assert out.revision == "a"
+    assert out.values == {"base_field": True, "a_field": True}
+
+
+def test_downgrade_through_merge_past_base():
+    eng = diamond_engine()
+    state = StateEnvelope(
+        values={"base_field": True, "a_field": True, "b_field": True}, revision="merge"
+    )
+
+    out = eng.downgrade_state(state, None)
+
+    assert out.revision is None
+    assert out.values == {}
+
+
+def test_upgrade_at_merge_head_is_noop():
+    eng = diamond_engine()
+    state = StateEnvelope(
+        values={"base_field": True, "a_field": True, "b_field": True}, revision="merge"
+    )
+    assert eng.upgrade_state(state, "head") is state

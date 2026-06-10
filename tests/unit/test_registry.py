@@ -145,3 +145,109 @@ def test_exceptions_exported_from_top_level():
 
     assert hasattr(langmigrate, "RevisionNotAncestorError")
     assert hasattr(langmigrate, "ChannelRemovalUnsupportedError")
+
+
+# -- merge revisions (multi-parent DAG) ---------------------------------------
+
+
+def _mk(revision: str, down_revision, field: str | None = None) -> BaseMigration:
+    """Tiny migration adding `field` (or a no-op for merge points)."""
+    rev, down, fld = revision, down_revision, field
+
+    class M(BaseMigration):
+        revision = rev
+        down_revision = down
+        slug = rev
+
+        def upgrade(self, state):
+            if fld is None:
+                return state
+            return self.add_field(state, fld, default=True)
+
+        def downgrade(self, state):
+            if fld is None:
+                return state
+            return self.drop_field(state, fld)
+
+    return M()
+
+
+def diamond() -> MigrationRegistry:
+    """base -> a, base -> b, merge(a, b)."""
+    return MigrationRegistry.from_migrations(
+        [
+            _mk("base", None, "base_field"),
+            _mk("a", "base", "a_field"),
+            _mk("b", "base", "b_field"),
+            _mk("merge", ("a", "b")),
+        ]
+    )
+
+
+def test_parents_normalization():
+    assert _mk("x", None).parents == ()
+    assert _mk("x", "p").parents == ("p",)
+    m = _mk("x", ("p", "q"))
+    assert m.parents == ("p", "q")
+    assert m.is_merge
+
+
+def test_diamond_single_head():
+    reg = diamond()
+    assert reg.heads() == ["merge"]
+    assert reg.head() == "merge"
+    assert reg.bases() == ["base"]
+
+
+def test_diamond_ancestors():
+    reg = diamond()
+    assert reg.ancestors("merge") == {"base", "a", "b"}
+    assert reg.ancestors("a") == {"base"}
+    assert reg.ancestors("base") == frozenset()
+
+
+def test_diamond_upgrade_path_from_none_is_deterministic_topo():
+    reg = diamond()
+    # 'a' < 'b' lexicographically, so the min-heap tie-break fixes the order.
+    assert reg.upgrade_path(None, "merge") == ["base", "a", "b", "merge"]
+
+
+def test_diamond_upgrade_path_from_branch():
+    reg = diamond()
+    # From 'a': base and a are already applied; remaining diff is {b, merge}.
+    assert reg.upgrade_path("a", "merge") == ["b", "merge"]
+
+
+def test_diamond_upgrade_between_branches_raises():
+    reg = diamond()
+    with pytest.raises(RevisionNotAncestorError):
+        reg.upgrade_path("a", "b")
+
+
+def test_diamond_downgrade_paths():
+    reg = diamond()
+    assert reg.downgrade_path("merge", None) == ["merge", "b", "a", "base"]
+    # Down to 'a': undo merge and b only (a and base stay applied).
+    assert reg.downgrade_path("merge", "a") == ["merge", "b"]
+
+
+def test_lineage_on_diamond_is_topological():
+    reg = diamond()
+    assert reg.lineage("merge") == ["base", "a", "b", "merge"]
+    # Linear sub-lineage unchanged.
+    assert reg.lineage("a") == ["base", "a"]
+
+
+def test_merge_with_unknown_parent_raises():
+    with pytest.raises(RevisionNotFoundError):
+        MigrationRegistry.from_migrations([_mk("base", None), _mk("m", ("base", "ghost"))])
+
+
+def test_merge_with_duplicate_parent_rejected():
+    with pytest.raises(ValueError, match="duplicate parent"):
+        MigrationRegistry.from_migrations([_mk("base", None), _mk("m", ("base", "base"))])
+
+
+def test_cycle_through_tuple_parents_detected():
+    with pytest.raises(CyclicHistoryError):
+        MigrationRegistry.from_migrations([_mk("x", ("y",)), _mk("y", ("x",))])

@@ -4,12 +4,16 @@ The registry holds the set of :class:`BaseMigration` instances, validates the
 revision graph (duplicates, cycles, unknown parents), and resolves the ordered
 path of revisions to apply for an upgrade or downgrade.
 
-Revisions form an Alembic-style DAG via ``down_revision`` pointers. The engine
-resolves a path here, then applies it as a linear cascade.
+Revisions form an Alembic-style DAG via ``down_revision`` pointers; a **merge
+revision** declares a tuple of parents to join branched heads. Paths are resolved
+as ancestor-set differences, linearized deterministically (Kahn's algorithm with
+ties broken on the smallest revision id), then applied by the engine as a linear
+cascade.
 """
 
 from __future__ import annotations
 
+import heapq
 import importlib.util
 import sys
 import uuid
@@ -38,6 +42,15 @@ class MigrationRegistry:
                 raise DuplicateRevisionError(m.revision)
             self._by_rev[m.revision] = m
         self._validate()
+        # The registry is immutable after construction, so derived DAG state can be
+        # built once / memoized: parent -> children edges, per-revision ancestor
+        # sets (filled lazily), and the head list.
+        self._children: dict[str, list[str]] = {rev: [] for rev in self._by_rev}
+        for m in self._by_rev.values():
+            for parent in m.parents:
+                self._children[parent].append(m.revision)
+        self._ancestors: dict[str, frozenset[str]] = {}
+        self._heads: list[str] = [rev for rev in self._by_rev if not self._children[rev]]
 
     # -- construction -------------------------------------------------------
 
@@ -115,9 +128,8 @@ class MigrationRegistry:
         return [m.revision for m in self._by_rev.values() if m.down_revision is None]
 
     def heads(self) -> list[str]:
-        """Revisions that are nobody's ``down_revision`` (the tips of the DAG)."""
-        referenced = {m.down_revision for m in self._by_rev.values() if m.down_revision is not None}
-        return [rev for rev in self._by_rev if rev not in referenced]
+        """Revisions that are nobody's parent (the tips of the DAG)."""
+        return list(self._heads)
 
     def head(self) -> str:
         """The single head, or raise :class:`MultipleHeadsError`."""
@@ -130,65 +142,147 @@ class MigrationRegistry:
 
     # -- path resolution ----------------------------------------------------
 
+    def ancestors(self, revision: str) -> frozenset[str]:
+        """Strict ancestor set of ``revision`` (excludes ``revision`` itself)."""
+        cached = self._ancestors.get(revision)
+        if cached is not None:
+            return cached
+        result: set[str] = set()
+        stack = list(self.get(revision).parents)
+        while stack:
+            rev = stack.pop()
+            if rev in result:
+                continue
+            if rev not in self._by_rev:
+                raise RevisionNotFoundError(rev)
+            result.add(rev)
+            cached = self._ancestors.get(rev)
+            if cached is not None:
+                result.update(cached)
+            else:
+                stack.extend(self._by_rev[rev].parents)
+        frozen = frozenset(result)
+        self._ancestors[revision] = frozen
+        return frozen
+
     def lineage(self, revision: str) -> list[str]:
-        """Ordered chain ``[base, ..., revision]`` following ``down_revision``."""
-        chain: list[str] = []
-        seen: set[str] = set()
-        cur: str | None = revision
-        while cur is not None:
-            if cur in seen:
-                raise CyclicHistoryError(chain + [cur])
-            if cur not in self._by_rev:
-                raise RevisionNotFoundError(cur)
-            seen.add(cur)
-            chain.append(cur)
-            cur = self._by_rev[cur].down_revision
-        chain.reverse()
-        return chain
+        """All ancestors of ``revision`` plus itself, in topological order.
+
+        Deterministic (ties broken on the smallest revision id) and ending at
+        ``revision``. For linear histories this is exactly the old
+        ``[base, ..., revision]`` chain.
+        """
+        return self._topo_sort(set(self.ancestors(revision)) | {revision})
 
     def upgrade_path(self, from_revision: str | None, to_revision: str) -> list[str]:
         """Revisions to apply (in order) to go from ``from_revision`` up to ``to``.
 
         ``from_revision`` of ``None`` means "untagged / base" — apply the whole
         lineage. Raises if ``from_revision`` is not an ancestor of ``to``.
+
+        With merges, the path is the topological linearization of
+        ``ancestors(to) - ancestors(from)`` (both inclusive). Since
+        ``from ∈ ancestors(to)`` implies ``ancestors(from) ⊆ ancestors(to)``,
+        the difference is well-defined; every parent of a diff revision is either
+        in the diff or already applied, so the restricted in-degrees are exact and
+        ``to`` always comes last.
         """
-        lineage = self.lineage(to_revision)
+        target_set = set(self.ancestors(to_revision)) | {to_revision}
         if from_revision is None:
-            return lineage
+            return self._topo_sort(target_set)
         if from_revision == to_revision:
             return []
-        if from_revision not in lineage:
-            if from_revision in self._by_rev:
-                raise RevisionNotAncestorError(from_revision, to_revision, direction="upgrade")
+        if from_revision not in self._by_rev:
             raise RevisionNotFoundError(from_revision)
-        return lineage[lineage.index(from_revision) + 1 :]
+        if from_revision not in target_set:
+            raise RevisionNotAncestorError(from_revision, to_revision, direction="upgrade")
+        done = set(self.ancestors(from_revision)) | {from_revision}
+        return self._topo_sort(target_set - done)
 
     def downgrade_path(self, from_revision: str, to_revision: str | None) -> list[str]:
         """Revisions to reverse (in order) to go from ``from`` down to ``to``.
 
         ``to_revision`` of ``None`` downgrades all the way past the base. Each listed
-        revision should have its ``downgrade`` applied, newest first.
+        revision should have its ``downgrade`` applied, newest first (the reverse of
+        the corresponding upgrade path).
         """
-        lineage = self.lineage(from_revision)
+        src_set = set(self.ancestors(from_revision)) | {from_revision}
         if to_revision is None:
-            return list(reversed(lineage))
+            return list(reversed(self._topo_sort(src_set)))
         if to_revision == from_revision:
             return []
-        if to_revision not in lineage:
-            if to_revision in self._by_rev:
-                raise RevisionNotAncestorError(to_revision, from_revision, direction="downgrade")
+        if to_revision not in self._by_rev:
             raise RevisionNotFoundError(to_revision)
-        return list(reversed(lineage[lineage.index(to_revision) + 1 :]))
+        if to_revision not in src_set:
+            raise RevisionNotAncestorError(to_revision, from_revision, direction="downgrade")
+        keep = set(self.ancestors(to_revision)) | {to_revision}
+        return list(reversed(self._topo_sort(src_set - keep)))
+
+    def _topo_sort(self, revs: set[str]) -> list[str]:
+        """Kahn's algorithm restricted to ``revs``, deterministic via a min-heap.
+
+        An edge parent->child counts only when both ends are in ``revs`` (parents
+        outside are, by construction of the callers, already applied). Ties are
+        broken on the smallest revision id so the linearization is stable across
+        processes and Python versions.
+        """
+        indegree = {rev: sum(1 for p in self._by_rev[rev].parents if p in revs) for rev in revs}
+        heap = [rev for rev, deg in indegree.items() if deg == 0]
+        heapq.heapify(heap)
+        out: list[str] = []
+        while heap:
+            rev = heapq.heappop(heap)
+            out.append(rev)
+            for child in self._children.get(rev, ()):
+                if child in revs:
+                    indegree[child] -= 1
+                    if indegree[child] == 0:
+                        heapq.heappush(heap, child)
+        if len(out) != len(revs):  # pragma: no cover - cycles are caught in _validate
+            raise CyclicHistoryError(sorted(set(revs) - set(out)))
+        return out
 
     # -- validation ---------------------------------------------------------
 
     def _validate(self) -> None:
         for m in self._by_rev.values():
-            if m.down_revision is not None and m.down_revision not in self._by_rev:
-                raise RevisionNotFoundError(m.down_revision)
-        # Walking each head's lineage surfaces any cycle via CyclicHistoryError.
-        for rev in self._by_rev:
-            self.lineage(rev)
+            parents = m.parents
+            if len(parents) != len(set(parents)):
+                raise ValueError(
+                    f"Migration {m.revision!r} lists a duplicate parent in down_revision"
+                )
+            for parent in parents:
+                if parent not in self._by_rev:
+                    raise RevisionNotFoundError(parent)
+        self._check_acyclic()
+
+    def _check_acyclic(self) -> None:
+        """Three-color iterative DFS over parent edges; raises on any cycle."""
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color = dict.fromkeys(self._by_rev, WHITE)
+        for start in self._by_rev:
+            if color[start] != WHITE:
+                continue
+            stack: list[tuple[str, bool]] = [(start, False)]
+            path: list[str] = []
+            while stack:
+                rev, processed = stack.pop()
+                if processed:
+                    color[rev] = BLACK
+                    path.pop()
+                    continue
+                if color[rev] == BLACK:
+                    continue
+                if color[rev] == GRAY:
+                    raise CyclicHistoryError(path[path.index(rev) :] + [rev])
+                color[rev] = GRAY
+                path.append(rev)
+                stack.append((rev, True))
+                for parent in self._by_rev[rev].parents:
+                    if color[parent] == GRAY:
+                        raise CyclicHistoryError(path[path.index(parent) :] + [parent])
+                    if color[parent] == WHITE:
+                        stack.append((parent, False))
 
 
 def new_revision_id() -> str:

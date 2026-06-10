@@ -23,6 +23,25 @@ from .types import _OPS_UNSET, StateEnvelope
 _UNSET = _OPS_UNSET
 
 
+def strict_equal(a: Any, b: Any) -> bool:
+    """Equality that treats a type change at ANY depth as a difference.
+
+    ``1 == 1.0`` and ``0 == False`` are real changes for persistence (the stored
+    blob differs), so plain ``==`` is not enough. Containers (dict/list/tuple) are
+    compared recursively. Remaining limitation: a type change buried inside an
+    *opaque* object (custom classes, sets — ``{1} == {1.0}``) is undetectable
+    without serializer coupling; a migration needing that should return a
+    structurally new value.
+    """
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(strict_equal(v, b[k]) for k, v in a.items())
+    if isinstance(a, (list, tuple)):
+        return len(a) == len(b) and all(map(strict_equal, a, b))
+    return a == b
+
+
 def add_field(
     state: StateEnvelope,
     name: str,
@@ -91,7 +110,9 @@ def coerce_field(
     if skip_if is not None and skip_if(value):
         return state
     new_value = fn(value)
-    if new_value is value or (new_value == value and type(new_value) is type(value)):
+    # Strict (deep, type-aware) comparison: a coercion like 1 -> 1.0 nested inside
+    # a container is a real change even though the values compare ``==``.
+    if new_value is value or strict_equal(new_value, value):
         return state
     return state.with_values({**state.values, name: new_value})
 

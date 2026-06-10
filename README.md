@@ -89,12 +89,15 @@ way Alembic does for SQL — see below.
 
 ## Status
 
-**Stable (1.0).** Postgres and Redis adapters are implemented for both the
-proactive batch and lazy online paths. The CLI, the runtime interceptor, and
-the state-level middleware are covered by unit and integration tests on
-every supported Python version (3.10–3.13). See the
-[CHANGELOG](./CHANGELOG.md) for release notes and [SECURITY.md](./SECURITY.md)
-for vulnerability reporting.
+**Stable (1.1).** Postgres and Redis adapters are implemented for both the
+proactive batch and lazy online paths; 1.1 adds merge revisions (multi-parent
+DAG), LangGraph **store** migrations (`MigrationStore` + `langmigrate store`),
+an async batch path, batch error tolerance (`--continue-on-error`), a
+validating dry-run, and an `on_unknown_revision` policy for rollback safety.
+The CLI, the runtime interceptors, and the state-level middleware are covered
+by unit and integration tests on every supported Python version (3.10–3.13).
+See the [CHANGELOG](./CHANGELOG.md) for release notes and
+[SECURITY.md](./SECURITY.md) for vulnerability reporting.
 
 ## Quickstart
 
@@ -157,6 +160,28 @@ with the middleware shim instead — see [docs/INTEGRATION.md](./docs/INTEGRATIO
 from langmigrate.integrations.langchain import SchemaMigrationMiddleware
 
 agent = create_agent(model, middleware=[SchemaMigrationMiddleware("migrations"), ...])
+```
+
+**Long-term memory (BaseStore) items** evolve too. Store migrations live in their
+own directory and the wrapper is symmetric to the checkpointer one:
+
+```python
+from langmigrate import setup_langmigrate_store
+
+store = setup_langmigrate_store(base_store, "store_migrations")
+# pass `store` to your compiled LangGraph as the store
+```
+
+```bash
+uv run langmigrate init --with-store
+uv run langmigrate store revision -m "add kind field"
+uv run langmigrate store upgrade head    # proactive batch (Postgres)
+```
+
+**Branched your migration history?** Join the heads with a merge revision:
+
+```bash
+uv run langmigrate merge -m "join heads"   # down_revision = ("head_a", "head_b")
 ```
 
 ## Design

@@ -22,11 +22,21 @@ from .core.registry import MigrationRegistry, new_revision_id
 from .core.topology import NodeRemap
 from .core.types import REVISION_METADATA_KEY, RevisionMeta, StateEnvelope
 from .integrations.state import migrate_state_update
-from .runtime.batch import BatchResult, run_batch_downgrade, run_batch_upgrade
-from .runtime.factory import setup_langmigrate
-from .runtime.interceptor import MigrationInterceptor
+from .runtime.batch import (
+    BatchFailure,
+    BatchResult,
+    arun_batch_downgrade,
+    arun_batch_upgrade,
+    run_batch_downgrade,
+    run_batch_upgrade,
+    run_store_batch_downgrade,
+    run_store_batch_upgrade,
+)
+from .runtime.factory import setup_langmigrate, setup_langmigrate_store
+from .runtime.interceptor import MigrationInterceptor, OnUnknownRevision
+from .runtime.store import MigrationStore
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "__version__",
@@ -37,15 +47,23 @@ __all__ = [
     "MigrationEngine",
     "MigrationRegistry",
     "MigrationInterceptor",
+    "MigrationStore",
+    "OnUnknownRevision",
     "setup_langmigrate",
+    "setup_langmigrate_store",
     "new_revision_id",
     "NodeRemap",
     "StateEnvelope",
     "RevisionMeta",
     "REVISION_METADATA_KEY",
+    "BatchFailure",
     "BatchResult",
     "run_batch_upgrade",
     "run_batch_downgrade",
+    "arun_batch_upgrade",
+    "arun_batch_downgrade",
+    "run_store_batch_upgrade",
+    "run_store_batch_downgrade",
     "migrate_state_update",
     # exceptions
     "LangMigrateError",

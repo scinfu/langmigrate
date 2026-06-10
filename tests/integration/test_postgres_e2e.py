@@ -280,3 +280,64 @@ def test_stamp_and_revision_counts_e2e(adapter):
 
     counts = adapter.revision_counts()
     assert counts.get("v2", 0) >= 1
+
+
+def test_setup_creates_revision_index_e2e(adapter):
+    # setup() must create the expression index backing the stale-checkpoint queries.
+    with adapter._conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM pg_indexes "
+            "WHERE indexname = 'ix_checkpoints_langmigrate_rev' AND tablename = 'checkpoints'"
+        )
+        assert cur.fetchone() is not None
+
+
+def test_keyset_pagination_enumerates_all_e2e(adapter, monkeypatch):
+    # Force tiny pages so the keyset loop runs several rounds and never skips rows.
+    from langmigrate.adapters import postgres as pg_module
+
+    monkeypatch.setattr(pg_module, "_PAGE_SIZE", 2)
+    prefix = f"page-{uuid.uuid4().hex[:8]}"
+    for i in range(5):
+        _seed_legacy(adapter.saver, f"{prefix}-{i}")
+
+    stale = [
+        c["configurable"]["thread_id"]
+        for c in adapter.iter_stale_configs("v2")
+        if c["configurable"]["thread_id"].startswith(prefix)
+    ]
+    assert sorted(stale) == sorted(f"{prefix}-{i}" for i in range(5))
+
+    everything = [
+        c["configurable"]["thread_id"]
+        for c in adapter.iter_all_configs()
+        if c["configurable"]["thread_id"].startswith(prefix)
+    ]
+    assert sorted(everything) == sorted(f"{prefix}-{i}" for i in range(5))
+
+    run_batch_upgrade(adapter, engine(), target="head")  # restore, don't leave stale
+
+
+async def test_async_batch_upgrade_e2e(adapter):
+    # Seed with the sync saver, heal through the async adapter + async runner.
+    from langmigrate.adapters.postgres import AsyncPostgresAdapter
+    from langmigrate.runtime.batch import arun_batch_upgrade
+
+    thread_id = f"t-{uuid.uuid4().hex[:8]}"
+    cfg = _seed_legacy(adapter.saver, thread_id)
+    chk_id = cfg["configurable"]["checkpoint_id"]
+
+    async_adapter = await AsyncPostgresAdapter.from_conn_string(PG)
+    try:
+        await async_adapter.setup()
+        result = await arun_batch_upgrade(async_adapter, engine(), target="head")
+    finally:
+        await async_adapter.aclose()
+    assert result.migrated >= 1
+
+    tup = adapter.saver.get_tuple(
+        {"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": chk_id}}
+    )
+    assert tup.metadata[REVISION_METADATA_KEY] == "v2"
+    assert tup.checkpoint["channel_values"] == {"messages": ["hi"], "count": 1, "context": {}}
+    assert tup.checkpoint["id"] == chk_id

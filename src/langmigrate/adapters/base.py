@@ -10,7 +10,7 @@ This module is pure — it declares a :class:`Protocol` only. Concrete adapters
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Protocol, runtime_checkable
 
 from langchain_core.runnables import RunnableConfig
@@ -45,4 +45,57 @@ class BatchCheckpointAdapter(CheckpointAdapter, Protocol):
 
     def iter_all_configs(self) -> Iterator[RunnableConfig]:
         """Yield a full ``RunnableConfig`` for every checkpoint in the store."""
+        ...
+
+
+@runtime_checkable
+class AsyncCheckpointAdapter(Protocol):
+    """Async counterpart of :class:`CheckpointAdapter` (for async savers)."""
+
+    @property
+    def saver(self) -> BaseCheckpointSaver:
+        """The underlying (async-capable) LangGraph checkpointer."""
+        ...
+
+    def aiter_stale_configs(self, head: str) -> AsyncIterator[RunnableConfig]:
+        """Yield a full ``RunnableConfig`` per stale checkpoint."""
+        ...
+
+
+@runtime_checkable
+class AsyncBatchCheckpointAdapter(AsyncCheckpointAdapter, Protocol):
+    """An :class:`AsyncCheckpointAdapter` that can enumerate *all* checkpoints."""
+
+    def aiter_all_configs(self) -> AsyncIterator[RunnableConfig]:
+        """Yield a full ``RunnableConfig`` for every checkpoint in the store."""
+        ...
+
+
+@runtime_checkable
+class StoreAdapter(Protocol):
+    """Backend-specific access to a LangGraph ``BaseStore`` for batch migration.
+
+    Item references are ``(namespace, key)`` pairs. The revision tag lives under
+    the reserved ``langmigrate_rev`` key *inside* each item's value.
+    """
+
+    @property
+    def store(self):  # -> BaseStore (untyped to keep this Protocol import-light)
+        """The underlying LangGraph store for reads/writes."""
+        ...
+
+    def iter_stale_items(self, head: str) -> Iterator[tuple[tuple[str, ...], str]]:
+        """Yield ``(namespace, key)`` for every item whose tag differs from ``head``."""
+        ...
+
+    def iter_all_items(self) -> Iterator[tuple[tuple[str, ...], str]]:
+        """Yield ``(namespace, key)`` for every item in the store."""
+        ...
+
+    def revision_counts(self) -> dict[str, int]:
+        """Distribution of stored revision tags across all items."""
+        ...
+
+    def stamp_all(self, revision: str) -> int:
+        """Set the revision tag on every item without running migrations."""
         ...

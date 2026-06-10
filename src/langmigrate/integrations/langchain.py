@@ -35,7 +35,7 @@ def _resolve_engine(engine_or_path: MigrationEngine | str | Path) -> MigrationEn
     return MigrationEngine(MigrationRegistry.from_path(engine_or_path))
 
 
-def _load_agent_middleware() -> type:
+def _load_agent_middleware() -> Any:
     try:
         from langchain.agents.middleware import AgentMiddleware
     except ImportError as exc:  # pragma: no cover - exercised only without langchain
@@ -44,7 +44,7 @@ def _load_agent_middleware() -> type:
             "Install it, or use langmigrate.integrations.state.migrate_state_update "
             "directly in your own node."
         ) from exc
-    return AgentMiddleware  # type: ignore[no-any-return]
+    return AgentMiddleware
 
 
 # Reserved channel the middleware contributes to the graph state so the revision

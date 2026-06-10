@@ -130,3 +130,41 @@ def test_require_field_blocks_without_fallback():
         ops.require_field(env(), "x", revision="abc123")
     assert ei.value.field == "x"
     assert ei.value.revision == "abc123"
+
+
+# -- strict_equal -------------------------------------------------------------
+
+
+def test_strict_equal_table():
+    from langmigrate.core.operations import strict_equal
+
+    cases = [
+        # (a, b, expected)
+        (1, 1, True),
+        (1, 1.0, False),  # int vs float, even though 1 == 1.0
+        (0, False, False),  # bool is not int for persistence purposes
+        ("x", "x", True),
+        ({"score": 1}, {"score": 1}, True),
+        ({"score": 1}, {"score": 1.0}, False),  # nested type change in a dict
+        ([1, 2], [1, 2], True),
+        ([1, 2], [1, 2.0], False),  # nested type change in a list
+        ([1, 2], (1, 2), False),  # list vs tuple
+        ({"a": [{"n": 1}]}, {"a": [{"n": 1.0}]}, False),  # deep nesting
+        ({"a": 1}, {"b": 1}, False),  # different keys
+        ([1], [1, 2], False),  # different lengths
+        (None, None, True),
+    ]
+    for a, b, expected in cases:
+        assert strict_equal(a, b) is expected, (a, b)
+
+
+def test_coerce_field_applies_nested_type_only_change():
+    # 1 -> 1.0 inside a container compares == with the same outer type; the strict
+    # comparison must still register it as a change.
+    from langmigrate.core.operations import coerce_field
+    from langmigrate.core.types import StateEnvelope
+
+    state = StateEnvelope(values={"stats": {"score": 1}})
+    out = coerce_field(state, "stats", lambda v: {**v, "score": float(v["score"])})
+    assert out is not state
+    assert type(out.values["stats"]["score"]) is float

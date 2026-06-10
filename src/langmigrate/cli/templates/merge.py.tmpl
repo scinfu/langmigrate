@@ -1,0 +1,27 @@
+"""${message}
+
+Merge revision joining: ${parents_label}
+
+Revision ID: ${revision}
+Down revisions: ${parents_label}
+Created: ${created}
+"""
+
+from __future__ import annotations
+
+from langmigrate import BaseMigration, StateEnvelope
+
+
+class Migration(BaseMigration):
+    revision = "${revision}"
+    down_revision = ${down_revision_repr}
+    slug = "${slug}"
+
+    def upgrade(self, state: StateEnvelope) -> StateEnvelope:
+        # A merge point usually carries no transform of its own: the migrations on
+        # both parent branches have already run. Add reconciliation here only if
+        # the branches changed the same fields in conflicting ways.
+        return state
+
+    def downgrade(self, state: StateEnvelope) -> StateEnvelope:
+        return state

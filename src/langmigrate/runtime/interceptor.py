@@ -9,12 +9,20 @@ Write-back (on by default) re-persists a migrated checkpoint **idempotently**:
 the checkpoint ``id`` and the ``parent_config`` chain are preserved, and only
 channels whose value actually changed get a bumped version (so ``versions_seen``
 stays valid for untouched channels).
+
+Limitations: ``pending_writes`` are passed through untouched. They are
+single-channel fragments, so running the whole-state cascade over them would
+mis-fire (``add_field``/``require_field`` would fabricate channels), and there is
+no idempotent rewrite API for them (``put_writes`` appends under task ids). If a
+deploy changes channels written by interrupted tasks, run the batch runner
+(``langmigrate upgrade``) before resuming those threads.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Iterator, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -26,8 +34,16 @@ from langgraph.checkpoint.base import (
 )
 
 from ..core.engine import HEAD, MigrationEngine
+from ..core.exceptions import RevisionNotFoundError
 from ..core.version import envelope_from_parts, stamp_metadata
 from .persistence import build_migrated_tuple, changed_versions, put_config
+
+#: Policy for state tagged with a revision the registry does not know (typically a
+#: code rollback after a lazy migration): fail the read, log and serve unmigrated,
+#: or serve unmigrated silently.
+OnUnknownRevision = Literal["raise", "warn", "pass"]
+
+logger = logging.getLogger("langmigrate.runtime")
 
 
 class MigrationInterceptor(BaseCheckpointSaver):
@@ -40,11 +56,13 @@ class MigrationInterceptor(BaseCheckpointSaver):
         *,
         write_back: bool = True,
         target: str = HEAD,
+        on_unknown_revision: OnUnknownRevision = "raise",
     ) -> None:
         self.saver = saver
         self.engine = engine
         self.write_back = write_back
         self.target = target
+        self.on_unknown_revision = on_unknown_revision
         # Reuse the wrapped saver's serializer so encode/decode stays consistent.
         super().__init__(serde=saver.serde)
 
@@ -121,6 +139,12 @@ class MigrationInterceptor(BaseCheckpointSaver):
     ) -> None:
         await self.saver.aput_writes(config, writes, task_id, task_path)
 
+    def delete_thread(self, thread_id: str) -> None:
+        self.saver.delete_thread(thread_id)
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        await self.saver.adelete_thread(thread_id)
+
     def list(
         self,
         config: RunnableConfig | None,
@@ -158,7 +182,21 @@ class MigrationInterceptor(BaseCheckpointSaver):
     def _migrate_tuple(self, tup: CheckpointTuple) -> tuple[CheckpointTuple, bool]:
         """Return (possibly migrated tuple, whether anything changed)."""
         envelope = envelope_from_parts(tup.checkpoint["channel_values"], dict(tup.metadata or {}))
-        migrated = self.engine.upgrade_state(envelope, self.target)
+        try:
+            migrated = self.engine.upgrade_state(envelope, self.target)
+        except RevisionNotFoundError as exc:
+            # Tolerate only the checkpoint's OWN tag being unknown (the code-rollback
+            # case); a bad target or broken registry pointer must still raise.
+            if self.on_unknown_revision == "raise" or exc.revision != envelope.revision:
+                raise
+            if self.on_unknown_revision == "warn":
+                logger.warning(
+                    "langmigrate: checkpoint carries unknown revision %r (not in the "
+                    "registry); returning it unmigrated. This usually means the code "
+                    "was rolled back after a lazy migration.",
+                    exc.revision,
+                )
+            return tup, False
         if migrated is envelope:
             return tup, False
         return build_migrated_tuple(tup, migrated, self.saver), True

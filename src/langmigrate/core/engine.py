@@ -66,15 +66,22 @@ class MigrationEngine:
     # -- downgrade ----------------------------------------------------------
 
     def downgrade_state(self, state: StateEnvelope, target: str | None) -> StateEnvelope:
-        """Fold the downgrade cascade down to ``target`` (``None`` = past the base)."""
+        """Fold the downgrade cascade down to ``target`` (``None`` = past the base).
+
+        The final ``target`` revision is stamped once at the end: per-step stamping
+        is ill-defined while undoing a merge revision (which parent would the state
+        be "on"?), and for linear histories the result is identical.
+        """
         if state.revision is None:
             raise LangMigrateError("Cannot downgrade an untagged state (no current revision)")
         if target is not None:
             target = self.resolve_target(target)
         if state.revision == target:
             return state
+        path = self.registry.downgrade_path(state.revision, target)
+        if not path:
+            return state
         current = state
-        for rev in self.registry.downgrade_path(state.revision, target):
-            migration = self.registry.get(rev)
-            current = migration.downgrade(current).with_revision(migration.down_revision)
-        return current
+        for rev in path:
+            current = self.registry.get(rev).downgrade(current)
+        return current.with_revision(target)

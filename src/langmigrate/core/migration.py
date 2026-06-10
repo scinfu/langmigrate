@@ -28,8 +28,9 @@ class BaseMigration(ABC):
 
     #: Unique revision id (Alembic-style hash). Set by subclasses.
     revision: str = ""
-    #: Parent revision id in the DAG, or ``None`` for the base revision.
-    down_revision: str | None = None
+    #: Parent revision id(s) in the DAG: ``None`` for the base revision, a single
+    #: id for a linear revision, or a tuple of ids for a **merge revision**.
+    down_revision: str | tuple[str, ...] | None = None
     #: Human-readable label, e.g. ``"add_context_field"``.
     slug: str = ""
     #: Optional branch labels for DAG branching/merging.
@@ -37,6 +38,20 @@ class BaseMigration(ABC):
     #: Optional schema snapshot ``{field: type_repr}`` *after* this revision.
     #: Written by ``revision --autogenerate`` and used as the baseline for the next.
     fields: dict[str, str] | None = None
+
+    @property
+    def parents(self) -> tuple[str, ...]:
+        """``down_revision`` normalized to a tuple (empty for a base revision)."""
+        if self.down_revision is None:
+            return ()
+        if isinstance(self.down_revision, str):
+            return (self.down_revision,)
+        return tuple(self.down_revision)
+
+    @property
+    def is_merge(self) -> bool:
+        """Whether this revision joins multiple parents (a merge revision)."""
+        return len(self.parents) > 1
 
     @abstractmethod
     def upgrade(self, state: StateEnvelope) -> StateEnvelope:
@@ -158,7 +173,7 @@ class FunctionMigration(BaseMigration):
         upgrade_fn: _Transform,
         *,
         revision: str,
-        down_revision: str | None = None,
+        down_revision: str | tuple[str, ...] | None = None,
         slug: str = "",
         branch_labels: tuple[str, ...] = (),
         fields: dict[str, str] | None = None,
@@ -205,7 +220,7 @@ class FunctionMigration(BaseMigration):
 def migration(
     revision: str,
     *,
-    down_revision: str | None = None,
+    down_revision: str | tuple[str, ...] | None = None,
     slug: str = "",
     branch_labels: tuple[str, ...] = (),
     fields: dict[str, str] | None = None,

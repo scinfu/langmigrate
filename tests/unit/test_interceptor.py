@@ -273,3 +273,199 @@ async def test_async_put_writes_delegates_to_wrapped_saver():
     raw = await saver.aget_tuple(cfg)
     assert raw is not None
     assert raw.pending_writes
+
+
+def test_delete_thread_delegates_to_wrapped_saver():
+    saver = InMemorySaver()
+    write_legacy_checkpoint(saver, "t1")
+    interceptor = MigrationInterceptor(saver, engine())
+
+    interceptor.delete_thread("t1")
+    assert saver.get_tuple({"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}) is None
+
+
+async def test_async_delete_thread_delegates_to_wrapped_saver():
+    saver = InMemorySaver()
+    await _aseed_legacy(saver, "t1")
+    interceptor = MigrationInterceptor(saver, engine())
+
+    await interceptor.adelete_thread("t1")
+    raw = await saver.aget_tuple({"configurable": {"thread_id": "t1", "checkpoint_ns": ""}})
+    assert raw is None
+
+
+# -- unknown-revision policy (code rollback safety) --------------------------
+
+
+def write_tagged_checkpoint(saver: InMemorySaver, thread_id: str, revision: str) -> dict:
+    """Persist a checkpoint already stamped with ``revision`` (maybe unknown)."""
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    chk: Checkpoint = empty_checkpoint()
+    chk["channel_values"] = {"messages": ["hi"], "count": 1}
+    chk["channel_versions"] = {"messages": 1, "count": 1}
+    metadata = {"source": "loop", REVISION_METADATA_KEY: revision}
+    return saver.put(config, chk, metadata, {"messages": 1, "count": 1})
+
+
+def test_unknown_revision_raises_by_default():
+    import pytest
+
+    from langmigrate.core.exceptions import RevisionNotFoundError
+
+    saver = InMemorySaver()
+    write_tagged_checkpoint(saver, "t1", "deadbeef")
+    interceptor = MigrationInterceptor(saver, engine())
+
+    with pytest.raises(RevisionNotFoundError):
+        interceptor.get_tuple({"configurable": {"thread_id": "t1", "checkpoint_ns": ""}})
+
+
+def test_unknown_revision_warn_serves_unmigrated(caplog):
+    import logging
+
+    saver = InMemorySaver()
+    write_tagged_checkpoint(saver, "t1", "deadbeef")
+    interceptor = MigrationInterceptor(saver, engine(), on_unknown_revision="warn")
+
+    with caplog.at_level(logging.WARNING, logger="langmigrate.runtime"):
+        tup = interceptor.get_tuple({"configurable": {"thread_id": "t1", "checkpoint_ns": ""}})
+    assert tup is not None
+    # Served as stored: no migration, tag untouched, nothing written back.
+    assert tup.checkpoint["channel_values"] == {"messages": ["hi"], "count": 1}
+    assert tup.metadata[REVISION_METADATA_KEY] == "deadbeef"
+    assert any("unknown revision" in rec.message for rec in caplog.records)
+
+
+def test_unknown_revision_pass_is_silent(caplog):
+    import logging
+
+    saver = InMemorySaver()
+    write_tagged_checkpoint(saver, "t1", "deadbeef")
+    interceptor = MigrationInterceptor(saver, engine(), on_unknown_revision="pass")
+
+    with caplog.at_level(logging.WARNING, logger="langmigrate.runtime"):
+        tup = interceptor.get_tuple({"configurable": {"thread_id": "t1", "checkpoint_ns": ""}})
+    assert tup is not None
+    assert tup.metadata[REVISION_METADATA_KEY] == "deadbeef"
+    assert not caplog.records
+
+
+def test_unknown_target_still_raises_under_tolerant_policy():
+    # The tolerance covers only the checkpoint's OWN tag; a bad *target* is a
+    # configuration error and must raise regardless of the policy.
+    import pytest
+
+    from langmigrate.core.exceptions import RevisionNotFoundError
+
+    saver = InMemorySaver()
+    write_legacy_checkpoint(saver, "t1")
+    interceptor = MigrationInterceptor(saver, engine(), target="nope", on_unknown_revision="warn")
+
+    with pytest.raises(RevisionNotFoundError):
+        interceptor.get_tuple({"configurable": {"thread_id": "t1", "checkpoint_ns": ""}})
+
+
+def test_unknown_revision_tolerated_in_list_too():
+    saver = InMemorySaver()
+    write_tagged_checkpoint(saver, "t1", "deadbeef")
+    interceptor = MigrationInterceptor(saver, engine(), on_unknown_revision="pass")
+
+    listed = list(interceptor.list({"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}))
+    assert listed[0].metadata[REVISION_METADATA_KEY] == "deadbeef"
+
+
+class NestedCoerce(BaseMigration):
+    revision = "n1"
+    down_revision = None
+
+    def upgrade(self, state):
+        # Type-only change buried inside a container: {"score": 1} -> {"score": 1.0}.
+        return self.coerce_field(
+            state,
+            "stats",
+            lambda v: {**v, "score": float(v["score"])},
+            skip_if=lambda v: isinstance(v.get("score"), float),
+        )
+
+    def downgrade(self, state):
+        return self.coerce_field(state, "stats", lambda v: {**v, "score": int(v["score"])})
+
+
+def test_write_back_persists_nested_type_only_coercion():
+    # Regression: 1 -> 1.0 inside a dict compares == with the same outer type, so a
+    # top-level check would skip the write-back and silently lose the migration.
+    saver = InMemorySaver()
+    cfg = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    chk = empty_checkpoint()
+    chk["channel_values"] = {"stats": {"score": 1}}
+    chk["channel_versions"] = {"stats": 1}
+    saver.put(cfg, chk, {"source": "loop"}, {"stats": 1})
+
+    eng = MigrationEngine(MigrationRegistry.from_migrations([NestedCoerce()]))
+    interceptor = MigrationInterceptor(saver, eng, write_back=True)
+    interceptor.get_tuple(cfg)
+
+    raw = saver.get_tuple(cfg)
+    assert raw.metadata[REVISION_METADATA_KEY] == "n1"
+    stored = raw.checkpoint["channel_values"]["stats"]["score"]
+    assert stored == 1.0
+    assert type(stored) is float
+
+
+def test_pending_writes_passed_through_on_migration():
+    # Limitation by design: pending writes are NOT migrated, only carried over.
+    saver = InMemorySaver()
+    cfg = write_legacy_checkpoint(saver, "t1")
+    saver.put_writes(cfg, [("msgs", ["pending"])], task_id="task-1")
+    interceptor = MigrationInterceptor(saver, engine(), write_back=True)
+
+    tup = interceptor.get_tuple({"configurable": {"thread_id": "t1", "checkpoint_ns": ""}})
+    # Checkpoint migrated, but the pending write still targets the legacy channel.
+    assert tup.checkpoint["channel_values"] == {"messages": ["hi"], "count": 1, "context": {}}
+    assert any(channel == "msgs" for _, channel, _ in tup.pending_writes)
+
+
+def test_lazy_upgrade_through_merge_revision():
+    # Diamond DAG: base -> a, base -> b, merge(a, b). An untagged checkpoint must
+    # flow through all four revisions lazily and land on the merge head.
+    def mk(revision, down_revision, fld=None):
+        rev, down, f = revision, down_revision, fld
+
+        ns = {
+            "revision": rev,
+            "down_revision": down,
+            "slug": rev,
+            "upgrade": lambda self, s: s if f is None else self.add_field(s, f, default=True),
+            "downgrade": lambda self, s: s if f is None else self.drop_field(s, f),
+        }
+        return type(f"M_{rev}", (BaseMigration,), ns)()
+
+    eng = MigrationEngine(
+        MigrationRegistry.from_migrations(
+            [
+                mk("base", None, "base_field"),
+                mk("a", "base", "a_field"),
+                mk("b", "base", "b_field"),
+                mk("merge", ("a", "b")),
+            ]
+        )
+    )
+    saver = InMemorySaver()
+    cfg = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    chk = empty_checkpoint()
+    chk["channel_values"] = {"count": 1}
+    chk["channel_versions"] = {"count": 1}
+    saver.put(cfg, chk, {"source": "loop"}, {"count": 1})
+
+    interceptor = MigrationInterceptor(saver, eng, write_back=True)
+    tup = interceptor.get_tuple(cfg)
+    assert tup.metadata[REVISION_METADATA_KEY] == "merge"
+    assert tup.checkpoint["channel_values"] == {
+        "count": 1,
+        "base_field": True,
+        "a_field": True,
+        "b_field": True,
+    }
+    # Idempotent second read.
+    again = interceptor.get_tuple(cfg)
+    assert again.checkpoint["channel_values"] == tup.checkpoint["channel_values"]

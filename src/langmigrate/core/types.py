@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
-from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,7 +26,7 @@ class RevisionMeta(BaseModel):
     """Identity of a single migration revision within the DAG."""
 
     revision: str
-    down_revision: str | None = None
+    down_revision: str | tuple[str, ...] | None = None
     slug: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     branch_labels: tuple[str, ...] = ()
@@ -115,38 +114,3 @@ class StateEnvelope(BaseModel):
         return ops.require_field(
             self, name, fallback=fallback, factory=factory, revision=self.revision
         )
-
-
-class OpKind(str, Enum):
-    """Classification of a declarative field operation."""
-
-    ADD = "add"
-    DROP = "drop"
-    RENAME = "rename"
-    COERCE = "coerce"
-    REQUIRE = "require"
-
-
-# Operations classed as safe never lose or reinterpret existing data.
-SAFE_OPS: frozenset[OpKind] = frozenset({OpKind.ADD, OpKind.DROP})
-
-
-class FieldOp(BaseModel):
-    """Declarative description of a single field-level transformation.
-
-    Used to record/inspect what a migration does (e.g. for ``history`` output and
-    future autogenerate support). The actual mutation lives in ``core.operations``.
-    """
-
-    kind: OpKind
-    field: str
-    new_name: str | None = None
-    default: Any = None
-    coerce: Callable[[Any], Any] | None = None
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    @property
-    def is_safe(self) -> bool:
-        """Whether this operation cannot lose or reinterpret existing data."""
-        return self.kind in SAFE_OPS

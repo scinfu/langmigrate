@@ -5,7 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] — 2026-06-10
+
+### Added
+
+- **Merge revisions (multi-parent DAG).** `down_revision` may now be a tuple of
+  parent ids; `langmigrate merge -m "..." [rev1 rev2 | heads]` scaffolds a merge
+  revision joining branched heads. Path resolution is a deterministic topological
+  linearization (ancestor-set differences, ties broken on revision id), so linear
+  histories behave exactly as before. `history` renders merge parents as `a + b`.
+- **LangGraph store support.** `MigrationStore` wraps any `BaseStore` and migrates
+  item values lazily; the revision tag lives under the reserved `langmigrate_rev`
+  key *inside* `Item.value` (injected on put, stripped from every returned item).
+  New `setup_langmigrate_store` factory, `PostgresStoreAdapter`,
+  `run_store_batch_upgrade` / `run_store_batch_downgrade`, and a
+  `langmigrate store {revision,history,current,check,upgrade,downgrade,stamp}`
+  CLI sub-app (`init --with-store` scaffolds `store_migrations/`). Redis store
+  batch enumeration is deferred; the online wrapper is backend-agnostic.
+- **Rollback safety: `on_unknown_revision` policy** (`"raise"` | `"warn"` |
+  `"pass"`) on `MigrationInterceptor`, `MigrationStore` and the factories. With
+  `"warn"`/`"pass"`, state tagged with a revision missing from the registry (a
+  code rollback after lazy migration) is served unmigrated instead of failing
+  the read. Default stays `"raise"`.
+- **Batch error tolerance.** `continue_on_error` on every batch runner records
+  per-checkpoint/item `BatchFailure`s (`ref`, `error`, `error_type`) instead of
+  aborting; `BatchResult` gains `failed` / `failures` / `ok`; the CLI grows
+  `--continue-on-error` and exits non-zero listing failures.
+- **Async batch path.** `arun_batch_upgrade` / `arun_batch_downgrade` plus
+  `AsyncPostgresAdapter` (psycopg `AsyncConnection` + `AsyncPostgresSaver`) for
+  running proactive migration inside async services. The CLI stays sync.
+- **Postgres expression indexes** on `metadata->>'langmigrate_rev'` (checkpoints)
+  and `value->>'langmigrate_rev'` (store), created by `setup()` — the stale scan
+  is now actually indexed, as documented.
+- `MigrationInterceptor.delete_thread` / `adelete_thread` now delegate to the
+  wrapped saver.
+
+### Changed
+
+- **Dry-run now validates.** `upgrade --online-dry-run` / `downgrade --dry-run`
+  execute the full cascade in memory (surfacing migration bugs against real
+  data) and only skip the write; previously stale checkpoints were just counted.
+- **Strict deep-equality for write-back.** A type-only change nested inside a
+  container (e.g. `1` → `1.0` in a dict) is now detected by `coerce_field` and
+  the version reconciliation, so the migrated blob is actually written back.
+- Postgres enumeration uses keyset pagination (no more full-result
+  materialization); the batch runners enumerate once (no `count_stale`
+  pre-pass — Redis no longer pays a double scan).
+- `MigrationRegistry.lineage()` is redefined as "all ancestors in topological
+  order" (identical output for pre-1.1 linear histories). `heads()` and ancestor
+  sets are cached (the registry is immutable after construction).
+- On downgrade the engine stamps the final target once at the end (identical
+  result for linear histories; well-defined across merges).
+- CLI renders registry errors (duplicates, cycles, unknown parents) as messages
+  instead of tracebacks.
+
+### Removed
+
+- `FieldOp`, `OpKind`, `SAFE_OPS` from `langmigrate.core.types` (never exported
+  from the package, no references anywhere).
+
+### Known limitations
+
+- `pending_writes` are passed through unmigrated (single-channel fragments; see
+  the note in `langmigrate.runtime.interceptor`). Run `langmigrate upgrade`
+  before deploys that change channels written by interrupted tasks.
 
 ### Added
 

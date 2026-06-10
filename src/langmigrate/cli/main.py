@@ -26,8 +26,16 @@ app = typer.Typer(
     add_completion=False,
 )
 
+store_app = typer.Typer(
+    name="store",
+    help="Schema migrations for the LangGraph BaseStore (long-term memory items).",
+    no_args_is_help=True,
+)
+app.add_typer(store_app, name="store")
+
 _TEMPLATE = Path(__file__).parent / "templates" / "revision.py.tmpl"
 _AUTO_TEMPLATE = Path(__file__).parent / "templates" / "revision_auto.py.tmpl"
+_MERGE_TEMPLATE = Path(__file__).parent / "templates" / "merge.py.tmpl"
 
 _MIGRATIONS_README = """\
 # Migrations
@@ -43,6 +51,7 @@ langmigrate revision -m "add field" \\
     --autogenerate --schema myapp.state:AgentState   # diff a schema to fill the body
 langmigrate history                               # show the revision DAG
 langmigrate check                                 # multiple heads / irreversible revisions
+langmigrate merge -m "join heads"                 # merge branched heads into one
 langmigrate upgrade head                          # migrate the database (batch)
 ```
 
@@ -67,7 +76,27 @@ def _load_registry(cfg: LangMigrateConfig) -> MigrationRegistry:
             fg=typer.colors.RED,
         )
         raise typer.Exit(1)
-    return MigrationRegistry.from_path(cfg.migrations_path)
+    return _registry_from_path(cfg.migrations_path)
+
+
+def _load_store_registry(cfg: LangMigrateConfig) -> MigrationRegistry:
+    if not cfg.store_migrations_path.is_dir():
+        typer.secho(
+            f"No store migrations directory at {cfg.store_migrations_path}. "
+            "Run `langmigrate init --with-store`.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+    return _registry_from_path(cfg.store_migrations_path)
+
+
+def _registry_from_path(path: Path) -> MigrationRegistry:
+    """Build a registry, rendering registry errors (duplicates, cycles, ...) nicely."""
+    try:
+        return MigrationRegistry.from_path(path)
+    except LangMigrateError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
 
 
 def _build_adapter(cfg: LangMigrateConfig):
@@ -92,6 +121,28 @@ def _build_adapter(cfg: LangMigrateConfig):
     return PostgresAdapter.from_conn_string(cfg.url)
 
 
+def _build_store_adapter(cfg: LangMigrateConfig):
+    if cfg.backend == "redis":
+        typer.secho(
+            "Store batch migration is Postgres-only for now (the online MigrationStore "
+            "wrapper works with any backend).",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+    if cfg.backend != "postgres":
+        typer.secho(f"Unknown backend {cfg.backend!r} (expected 'postgres').", fg=typer.colors.RED)
+        raise typer.Exit(1)
+    if not cfg.url:
+        typer.secho(
+            "No database url configured (set it in langmigrate.toml or LANGMIGRATE_URL).",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+    from ..adapters.postgres import PostgresStoreAdapter
+
+    return PostgresStoreAdapter.from_conn_string(cfg.url)
+
+
 def _scaffold_file(path: Path, content: str) -> None:
     """Write ``content`` to ``path`` only if it does not already exist."""
     if path.exists():
@@ -106,6 +157,9 @@ def init(
     migrations_dir: str = typer.Option("migrations", help="Directory for revision scripts."),
     example: bool = typer.Option(
         False, "--example", help="Also scaffold a first (empty) revision skeleton."
+    ),
+    with_store: bool = typer.Option(
+        False, "--with-store", help="Also scaffold a store_migrations directory (BaseStore)."
     ),
 ) -> None:
     """Create langmigrate.toml and a scaffolded migrations directory."""
@@ -127,6 +181,12 @@ def init(
     _scaffold_file(mig_dir / "__init__.py", "")
     _scaffold_file(mig_dir / "README.md", _MIGRATIONS_README.format(dir=migrations_dir))
 
+    if with_store:
+        store_dir = Path(LangMigrateConfig().store_migrations_dir)
+        store_dir.mkdir(parents=True, exist_ok=True)
+        typer.secho(f"Created {store_dir}/", fg=typer.colors.GREEN)
+        _scaffold_file(store_dir / "__init__.py", "")
+
     if example:
         _scaffold_example_revision(mig_dir)
 
@@ -147,25 +207,23 @@ def _scaffold_example_revision(mig_dir: Path) -> None:
     _scaffold_file(mig_dir / f"{revision_id}_{slug}.py", rendered)
 
 
-@app.command()
-def revision(
-    message: str = typer.Option(..., "-m", "--message", help="Description of the change."),
-    autogenerate: bool = typer.Option(
-        False, "--autogenerate", help="Diff a schema against the head snapshot to fill the body."
-    ),
-    schema: str = typer.Option(
-        None, "--schema", help="Schema ref 'module.path:Attr' (required with --autogenerate)."
-    ),
+def _create_revision(
+    migrations_path: Path,
+    message: str,
+    autogenerate: bool,
+    schema: str | None,
+    *,
+    merge_hint: str = 'langmigrate merge -m "merge heads"',
 ) -> None:
-    """Generate a new revision script chained onto the current head."""
-    cfg = LangMigrateConfig.load()
-    cfg.migrations_path.mkdir(parents=True, exist_ok=True)
-    registry = MigrationRegistry.from_path(cfg.migrations_path)
+    """Shared body of ``revision`` / ``store revision``."""
+    migrations_path.mkdir(parents=True, exist_ok=True)
+    registry = _registry_from_path(migrations_path)
 
     try:
         down_revision = registry.head() if len(registry) else None
     except MultipleHeadsError as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
+        typer.secho(f"Run: {merge_hint}", fg=typer.colors.YELLOW)
         raise typer.Exit(1) from exc
 
     revision_id = new_revision_id()
@@ -184,11 +242,41 @@ def revision(
     else:
         rendered = string.Template(_TEMPLATE.read_text()).substitute(**common)
 
-    out = cfg.migrations_path / f"{revision_id}_{slug}.py"
+    out = migrations_path / f"{revision_id}_{slug}.py"
     out.write_text(rendered)
     typer.secho(f"Created revision {revision_id} -> {out}", fg=typer.colors.GREEN)
     if down_revision:
         typer.echo(f"  down_revision = {down_revision}")
+
+
+@app.command()
+def revision(
+    message: str = typer.Option(..., "-m", "--message", help="Description of the change."),
+    autogenerate: bool = typer.Option(
+        False, "--autogenerate", help="Diff a schema against the head snapshot to fill the body."
+    ),
+    schema: str = typer.Option(
+        None, "--schema", help="Schema ref 'module.path:Attr' (required with --autogenerate)."
+    ),
+) -> None:
+    """Generate a new revision script chained onto the current head."""
+    cfg = LangMigrateConfig.load()
+    _create_revision(cfg.migrations_path, message, autogenerate, schema)
+
+
+def _baseline_fields(registry: MigrationRegistry, down_revision: str | None) -> dict[str, str]:
+    """Most recent ``fields`` snapshot at or below ``down_revision``.
+
+    Merge revisions (and hand-written ones) carry ``fields = None``, so walk the
+    lineage newest-first until a snapshot is found.
+    """
+    if down_revision is None:
+        return {}
+    for rev in reversed(registry.lineage(down_revision)):
+        fields = registry.get(rev).fields
+        if fields is not None:
+            return fields
+    return {}
 
 
 def _render_autogenerated(common, registry, down_revision, schema) -> str:
@@ -203,7 +291,7 @@ def _render_autogenerated(common, registry, down_revision, schema) -> str:
         typer.secho(f"Could not load schema {schema!r}: {exc}", fg=typer.colors.RED)
         raise typer.Exit(1) from exc
 
-    old_schema = registry.get(down_revision).fields or {} if down_revision else {}
+    old_schema = _baseline_fields(registry, down_revision)
     diff = diff_schema(old_schema, new_schema)
     if diff.is_empty:
         typer.secho("No schema changes detected against the head snapshot.", fg=typer.colors.YELLOW)
@@ -221,38 +309,88 @@ def _render_autogenerated(common, registry, down_revision, schema) -> str:
     )
 
 
+def _format_parents(mig) -> str:
+    parents = mig.parents
+    if not parents:
+        return "(base)"
+    return " + ".join(parents)
+
+
 @app.command()
-def history() -> None:
-    """Print the revision DAG, newest first per head."""
+def merge(
+    revisions: list[str] = typer.Argument(
+        None, help="Revisions to merge. Omit (or pass 'heads') to merge all current heads."
+    ),
+    message: str = typer.Option(..., "-m", "--message", help="Description of the merge."),
+) -> None:
+    """Create a merge revision joining multiple heads into a single one."""
     cfg = LangMigrateConfig.load()
     registry = _load_registry(cfg)
+
+    if not revisions or revisions == ["heads"]:
+        parents = sorted(registry.heads())
+    else:
+        parents = sorted(set(revisions))
+    if len(parents) < 2:
+        typer.secho(
+            f"Nothing to merge: need at least two distinct revisions, got {parents}.",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+    for rev in parents:
+        if rev not in registry:
+            typer.secho(f"Revision {rev!r} not found in the registry.", fg=typer.colors.RED)
+            raise typer.Exit(1)
+    for rev in parents:
+        ancestors = registry.ancestors(rev)
+        overlapping = [other for other in parents if other != rev and other in ancestors]
+        if overlapping:
+            typer.secho(
+                f"Cannot merge {overlapping[0]!r} with its own descendant {rev!r}: "
+                "the edge would be redundant.",
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(1)
+
+    revision_id = new_revision_id()
+    slug = _slugify(message)
+    rendered = string.Template(_MERGE_TEMPLATE.read_text()).substitute(
+        message=message,
+        revision=revision_id,
+        parents_label=", ".join(parents),
+        down_revision_repr=repr(tuple(parents)),
+        slug=slug,
+        created=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    )
+    out = cfg.migrations_path / f"{revision_id}_{slug}.py"
+    out.write_text(rendered)
+    typer.secho(f"Created merge revision {revision_id} -> {out}", fg=typer.colors.GREEN)
+    typer.echo(f"  down_revision = {tuple(parents)!r}")
+
+
+def _emit_history(registry: MigrationRegistry) -> None:
     if not len(registry):
         typer.echo("(no revisions yet)")
         return
+    printed: set[str] = set()
     for head in registry.heads():
         for rev in reversed(registry.lineage(head)):
+            if rev in printed:
+                continue
+            printed.add(rev)
             mig = registry.get(rev)
-            down = mig.down_revision or "(base)"
             marker = " (head)" if rev == head else ""
-            typer.echo(f"{rev} <- {down}  {mig.slug}{marker}")
+            typer.echo(f"{rev} <- {_format_parents(mig)}  {mig.slug}{marker}")
 
 
-@app.command()
-def current(
-    db: bool = typer.Option(
-        False, "--db", help="Also show the revision distribution in the database."
-    ),
-) -> None:
-    """Show the code's head revision (and optionally the database state)."""
-    cfg = LangMigrateConfig.load()
-    registry = _load_registry(cfg)
+def _emit_current(registry: MigrationRegistry, adapter) -> None:
+    """Print the code head; with ``adapter`` also the DB revision distribution."""
     try:
         typer.secho(f"code head: {registry.head()}", fg=typer.colors.GREEN)
     except MultipleHeadsError as exc:
         typer.secho(str(exc), fg=typer.colors.YELLOW)
 
-    if db:
-        adapter = _build_adapter(cfg)
+    if adapter is not None:
         try:
             counts = adapter.revision_counts()
         finally:
@@ -262,11 +400,7 @@ def current(
             typer.echo(f"  {rev}: {count}")
 
 
-@app.command()
-def check() -> None:
-    """Report multiple heads and irreversible (no-downgrade) migrations."""
-    cfg = LangMigrateConfig.load()
-    registry = _load_registry(cfg)
+def _emit_check(registry: MigrationRegistry) -> None:
     problems = 0
 
     heads = registry.heads()
@@ -289,10 +423,56 @@ def check() -> None:
 
 
 @app.command()
+def history() -> None:
+    """Print the revision DAG, newest first per head."""
+    cfg = LangMigrateConfig.load()
+    _emit_history(_load_registry(cfg))
+
+
+@app.command()
+def current(
+    db: bool = typer.Option(
+        False, "--db", help="Also show the revision distribution in the database."
+    ),
+) -> None:
+    """Show the code's head revision (and optionally the database state)."""
+    cfg = LangMigrateConfig.load()
+    registry = _load_registry(cfg)
+    _emit_current(registry, _build_adapter(cfg) if db else None)
+
+
+@app.command()
+def check() -> None:
+    """Report multiple heads and irreversible (no-downgrade) migrations."""
+    cfg = LangMigrateConfig.load()
+    _emit_check(_load_registry(cfg))
+
+
+def _report_batch_result(result) -> None:
+    """Render a BatchResult, listing failures and exiting non-zero if any."""
+    color = typer.colors.GREEN if result.ok else typer.colors.YELLOW
+    typer.secho(str(result), fg=color)
+    if result.ok:
+        return
+    shown = result.failures[:20]
+    for failure in shown:
+        typer.secho(f"  {failure.ref}: {failure.error_type}: {failure.error}", fg=typer.colors.RED)
+    remaining = result.failed - len(shown)
+    if remaining > 0:
+        typer.secho(f"  ... and {remaining} more failures", fg=typer.colors.RED)
+    raise typer.Exit(1)
+
+
+@app.command()
 def upgrade(
     target: str = typer.Argument(HEAD, help="Target revision (default: head)."),
     online_dry_run: bool = typer.Option(
-        False, "--online-dry-run", help="Count stale checkpoints without writing."
+        False,
+        "--online-dry-run",
+        help="Run the full cascade in memory without writing (validates migrations).",
+    ),
+    continue_on_error: bool = typer.Option(
+        False, "--continue-on-error", help="Record failing checkpoints instead of aborting."
     ),
 ) -> None:
     """Proactively migrate every stale checkpoint in the database up to TARGET."""
@@ -303,19 +483,30 @@ def upgrade(
     adapter = _build_adapter(cfg)
     try:
         adapter.setup()
-        result = run_batch_upgrade(adapter, engine, target=target, dry_run=online_dry_run)
+        result = run_batch_upgrade(
+            adapter,
+            engine,
+            target=target,
+            dry_run=online_dry_run,
+            continue_on_error=continue_on_error,
+        )
     except LangMigrateError as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(1) from exc
     finally:
         adapter.close()
-    typer.secho(str(result), fg=typer.colors.GREEN)
+    _report_batch_result(result)
 
 
 @app.command()
 def downgrade(
     target: str = typer.Argument(..., help="Target revision to downgrade to ('base' for none)."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Count without writing."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Run the full cascade in memory without writing."
+    ),
+    continue_on_error: bool = typer.Option(
+        False, "--continue-on-error", help="Record failing checkpoints instead of aborting."
+    ),
 ) -> None:
     """Downgrade every checkpoint in the database down to TARGET."""
     from ..runtime.batch import run_batch_downgrade
@@ -326,13 +517,15 @@ def downgrade(
     adapter = _build_adapter(cfg)
     try:
         adapter.setup()
-        result = run_batch_downgrade(adapter, engine, resolved, dry_run=dry_run)
+        result = run_batch_downgrade(
+            adapter, engine, resolved, dry_run=dry_run, continue_on_error=continue_on_error
+        )
     except LangMigrateError as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(1) from exc
     finally:
         adapter.close()
-    typer.secho(str(result), fg=typer.colors.GREEN)
+    _report_batch_result(result)
 
 
 @app.command()
@@ -366,6 +559,143 @@ def stamp(
     finally:
         adapter.close()
     typer.secho(f"Stamped {updated} checkpoints as {revision}.", fg=typer.colors.GREEN)
+
+
+# -- store sub-commands (langmigrate store ...) --------------------------------
+
+
+@store_app.command("revision")
+def store_revision(
+    message: str = typer.Option(..., "-m", "--message", help="Description of the change."),
+) -> None:
+    """Generate a new store revision script chained onto the current store head."""
+    cfg = LangMigrateConfig.load()
+    _create_revision(
+        cfg.store_migrations_path,
+        message,
+        autogenerate=False,
+        schema=None,
+        merge_hint="create a merge revision in the store migrations directory",
+    )
+
+
+@store_app.command("history")
+def store_history() -> None:
+    """Print the store revision DAG, newest first per head."""
+    cfg = LangMigrateConfig.load()
+    _emit_history(_load_store_registry(cfg))
+
+
+@store_app.command("current")
+def store_current(
+    db: bool = typer.Option(
+        False, "--db", help="Also show the revision distribution in the database."
+    ),
+) -> None:
+    """Show the store code head (and optionally the database state)."""
+    cfg = LangMigrateConfig.load()
+    registry = _load_store_registry(cfg)
+    _emit_current(registry, _build_store_adapter(cfg) if db else None)
+
+
+@store_app.command("check")
+def store_check() -> None:
+    """Report multiple heads and irreversible store migrations."""
+    cfg = LangMigrateConfig.load()
+    _emit_check(_load_store_registry(cfg))
+
+
+@store_app.command("upgrade")
+def store_upgrade(
+    target: str = typer.Argument(HEAD, help="Target revision (default: head)."),
+    online_dry_run: bool = typer.Option(
+        False,
+        "--online-dry-run",
+        help="Run the full cascade in memory without writing (validates migrations).",
+    ),
+    continue_on_error: bool = typer.Option(
+        False, "--continue-on-error", help="Record failing items instead of aborting."
+    ),
+) -> None:
+    """Proactively migrate every stale store item in the database up to TARGET."""
+    from ..runtime.batch import run_store_batch_upgrade
+
+    cfg = LangMigrateConfig.load()
+    engine = MigrationEngine(_load_store_registry(cfg))
+    adapter = _build_store_adapter(cfg)
+    try:
+        adapter.setup()
+        result = run_store_batch_upgrade(
+            adapter,
+            engine,
+            target=target,
+            dry_run=online_dry_run,
+            continue_on_error=continue_on_error,
+        )
+    except LangMigrateError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
+    finally:
+        adapter.close()
+    _report_batch_result(result)
+
+
+@store_app.command("downgrade")
+def store_downgrade(
+    target: str = typer.Argument(..., help="Target revision to downgrade to ('base' for none)."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Run the full cascade in memory without writing."
+    ),
+    continue_on_error: bool = typer.Option(
+        False, "--continue-on-error", help="Record failing items instead of aborting."
+    ),
+) -> None:
+    """Downgrade every store item in the database down to TARGET."""
+    from ..runtime.batch import run_store_batch_downgrade
+
+    cfg = LangMigrateConfig.load()
+    engine = MigrationEngine(_load_store_registry(cfg))
+    resolved: str | None = None if target == "base" else target
+    adapter = _build_store_adapter(cfg)
+    try:
+        adapter.setup()
+        result = run_store_batch_downgrade(
+            adapter, engine, resolved, dry_run=dry_run, continue_on_error=continue_on_error
+        )
+    except LangMigrateError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
+    finally:
+        adapter.close()
+    _report_batch_result(result)
+
+
+@store_app.command("stamp")
+def store_stamp(
+    revision: str = typer.Argument(..., help="Revision id to record on all store items."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt."),
+) -> None:
+    """Set the revision tag on all store items WITHOUT running migrations."""
+    cfg = LangMigrateConfig.load()
+    registry = _load_store_registry(cfg)
+    registry.get(revision)  # validate it exists
+
+    typer.secho(
+        f"WARNING: stamp tags every store item as {revision!r} WITHOUT migrating data. "
+        "If the stored data doesn't already match this revision, it will be treated as "
+        "up to date and never upgraded. Use `store upgrade` to actually transform data.",
+        fg=typer.colors.YELLOW,
+    )
+    if not yes:
+        typer.confirm("Proceed with stamping?", abort=True)
+
+    adapter = _build_store_adapter(cfg)
+    try:
+        adapter.setup()
+        updated = adapter.stamp_all(revision)
+    finally:
+        adapter.close()
+    typer.secho(f"Stamped {updated} store items as {revision}.", fg=typer.colors.GREEN)
 
 
 if __name__ == "__main__":  # pragma: no cover

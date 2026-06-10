@@ -197,3 +197,218 @@ def test_batch_downgrade_to_current_revision_is_noop():
     (t,) = list(saver.list(None))
     assert read_revision(t.metadata) == "v1"
     assert t.checkpoint["channel_values"] == {"count": 1, "context": {}}
+
+
+# -- error tolerance & validating dry-run -------------------------------------
+
+
+class Poison(BaseMigration):
+    """Fails on checkpoints whose `count` is the poison value."""
+
+    revision = "p1"
+    down_revision = None
+
+    def upgrade(self, state):
+        if state.values.get("count") == 666:
+            raise ValueError("poisoned checkpoint")
+        return self.add_field(state, "context", default={})
+
+    def downgrade(self, state):
+        if state.values.get("count") == 666:
+            raise ValueError("poisoned checkpoint")
+        return self.drop_field(state, "context")
+
+
+def seed_count(saver: InMemorySaver, thread_id: str, count: int) -> None:
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    chk: Checkpoint = empty_checkpoint()
+    chk["channel_values"] = {"count": count}
+    chk["channel_versions"] = {"count": 1}
+    saver.put(config, chk, {"source": "loop"}, {"count": 1})
+
+
+def poison_engine() -> MigrationEngine:
+    return MigrationEngine(MigrationRegistry.from_migrations([Poison()]))
+
+
+def test_batch_upgrade_aborts_on_error_by_default():
+    import pytest
+
+    saver = InMemorySaver()
+    seed_count(saver, "bad", 666)
+    adapter = InMemoryAdapter(saver)
+
+    with pytest.raises(ValueError, match="poisoned"):
+        run_batch_upgrade(adapter, poison_engine(), target="head")
+
+
+def test_batch_upgrade_continue_on_error_collects_failures():
+    saver = InMemorySaver()
+    seed_count(saver, "ok-1", 1)
+    seed_count(saver, "bad", 666)
+    seed_count(saver, "ok-2", 2)
+    adapter = InMemoryAdapter(saver)
+
+    result = run_batch_upgrade(adapter, poison_engine(), target="head", continue_on_error=True)
+
+    assert result.total == 3
+    assert result.migrated == 2
+    assert result.failed == 1
+    assert not result.ok
+    (failure,) = result.failures
+    assert failure.ref.startswith("bad/")
+    assert failure.error_type == "ValueError"
+    assert "poisoned" in failure.error
+    # The healthy checkpoints were migrated despite the failure.
+    healed = {
+        t.config["configurable"]["thread_id"]: read_revision(t.metadata) for t in saver.list(None)
+    }
+    assert healed["ok-1"] == "p1"
+    assert healed["ok-2"] == "p1"
+    assert healed["bad"] is None
+
+
+def test_batch_dry_run_validates_migrations():
+    # A dry run executes the cascade in memory: a broken migration must surface
+    # instead of being silently counted as "would migrate".
+    import pytest
+
+    saver = InMemorySaver()
+    seed_count(saver, "bad", 666)
+    adapter = InMemoryAdapter(saver)
+
+    with pytest.raises(ValueError, match="poisoned"):
+        run_batch_upgrade(adapter, poison_engine(), target="head", dry_run=True)
+
+
+def test_batch_upgrade_does_not_use_count_stale():
+    # The runner enumerates once; count_stale stays on the protocol for
+    # compatibility but must not be called (Redis would pay a second full scan).
+    class CountingAdapter(InMemoryAdapter):
+        count_stale_calls = 0
+
+        def count_stale(self, head: str) -> int:
+            type(self).count_stale_calls += 1
+            return super().count_stale(head)
+
+    saver = InMemorySaver()
+    seed(saver, "a")
+    adapter = CountingAdapter(saver)
+
+    run_batch_upgrade(adapter, engine(), target="head")
+    assert CountingAdapter.count_stale_calls == 0
+
+
+def test_batch_downgrade_continue_on_error_collects_failures():
+    saver = InMemorySaver()
+    seed_count(saver, "ok", 1)
+    seed_count(saver, "bad", 666)
+    adapter = InMemoryAdapter(saver)
+    # Manually stamp both as p1 so the downgrade path runs (bad would fail upgrade).
+    for t in list(saver.list(None)):
+        meta = dict(t.metadata or {})
+        meta[REVISION_METADATA_KEY] = "p1"
+        saver.put(t.config, t.checkpoint, meta, {})
+
+    result = run_batch_downgrade(adapter, poison_engine(), None, continue_on_error=True)
+
+    assert result.failed == 1
+    assert result.failures[0].error_type == "ValueError"
+    healed = {
+        t.config["configurable"]["thread_id"]: read_revision(t.metadata) for t in saver.list(None)
+    }
+    assert healed["ok"] is None  # downgraded past base -> untagged
+    assert healed["bad"] == "p1"  # left as-is, recorded as failure
+
+
+# -- async runners -------------------------------------------------------------
+
+
+class AsyncInMemoryAdapter:
+    """Async adapter over InMemorySaver (it implements the async saver API)."""
+
+    def __init__(self, saver: InMemorySaver) -> None:
+        self._saver = saver
+
+    @property
+    def saver(self) -> InMemorySaver:
+        return self._saver
+
+    async def aiter_stale_configs(self, head: str):
+        for t in [tup async for tup in self._saver.alist(None)]:
+            if read_revision(t.metadata) != head:
+                yield t.config
+
+    async def aiter_all_configs(self):
+        for t in [tup async for tup in self._saver.alist(None)]:
+            yield t.config
+
+
+async def test_async_batch_upgrade_migrates_all_stale():
+    from langmigrate.runtime.batch import arun_batch_upgrade
+
+    saver = InMemorySaver()
+    seed(saver, "a")
+    seed(saver, "b")
+    adapter = AsyncInMemoryAdapter(saver)
+
+    result = await arun_batch_upgrade(adapter, engine(), target="head")
+
+    assert result.total == 2
+    assert result.migrated == 2
+    for t in saver.list(None):
+        assert t.metadata[REVISION_METADATA_KEY] == "v1"
+        assert t.checkpoint["channel_values"] == {"count": 1, "context": {}}
+
+
+async def test_async_batch_upgrade_dry_run_validates_without_writing():
+    import pytest
+
+    from langmigrate.runtime.batch import arun_batch_upgrade
+
+    saver = InMemorySaver()
+    seed(saver, "a")
+    adapter = AsyncInMemoryAdapter(saver)
+
+    result = await arun_batch_upgrade(adapter, engine(), target="head", dry_run=True)
+    assert result.dry_run and result.migrated == 1
+    (t,) = list(saver.list(None))
+    assert REVISION_METADATA_KEY not in t.metadata  # untouched
+
+    # And a broken migration surfaces during the dry run.
+    seed_count(saver, "bad", 666)
+    with pytest.raises(ValueError, match="poisoned"):
+        await arun_batch_upgrade(adapter, poison_engine(), target="head", dry_run=True)
+
+
+async def test_async_batch_upgrade_continue_on_error():
+    from langmigrate.runtime.batch import arun_batch_upgrade
+
+    saver = InMemorySaver()
+    seed_count(saver, "ok", 1)
+    seed_count(saver, "bad", 666)
+    adapter = AsyncInMemoryAdapter(saver)
+
+    result = await arun_batch_upgrade(
+        adapter, poison_engine(), target="head", continue_on_error=True
+    )
+    assert result.failed == 1
+    assert result.migrated == 1
+    assert result.failures[0].error_type == "ValueError"
+
+
+async def test_async_batch_downgrade_to_base():
+    from langmigrate.runtime.batch import arun_batch_downgrade, arun_batch_upgrade
+
+    saver = InMemorySaver()
+    seed(saver, "a")
+    adapter = AsyncInMemoryAdapter(saver)
+    await arun_batch_upgrade(adapter, engine(), target="head")
+
+    result = await arun_batch_downgrade(adapter, engine(), None)
+
+    assert result.target == "base"
+    assert result.migrated == 1
+    (t,) = list(saver.list(None))
+    assert "context" not in t.checkpoint["channel_values"]
+    assert read_revision(t.metadata) is None

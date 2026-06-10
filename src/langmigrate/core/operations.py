@@ -39,7 +39,7 @@ def strict_equal(a: Any, b: Any) -> bool:
         return a.keys() == b.keys() and all(strict_equal(v, b[k]) for k, v in a.items())
     if isinstance(a, (list, tuple)):
         return len(a) == len(b) and all(map(strict_equal, a, b))
-    return a == b
+    return bool(a == b)
 
 
 def add_field(

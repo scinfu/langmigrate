@@ -44,7 +44,7 @@ def _load_agent_middleware() -> type:
             "Install it, or use langmigrate.integrations.state.migrate_state_update "
             "directly in your own node."
         ) from exc
-    return AgentMiddleware
+    return AgentMiddleware  # type: ignore[no-any-return]
 
 
 # Reserved channel the middleware contributes to the graph state so the revision

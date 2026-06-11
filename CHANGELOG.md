@@ -21,6 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CI type check no longer fails on `SchemaMigrationMiddleware`'s dynamic
+  `state_schema`.** Recent mypy releases attribute the "Invalid TypedDict()
+  field name" error of the functional `TypedDict(...)` call (whose field name is
+  the runtime `rev_key`) to the line carrying the field dict, so the existing
+  `# type: ignore[misc]` on the call's opening line stopped suppressing it and
+  `mypy src/langmigrate` failed. The suppression now sits on the reported line.
+- **Batch downgrade counts scanned checkpoints/items consistently.** The
+  downgrade runners (`run_batch_downgrade`, `arun_batch_downgrade`,
+  `run_store_batch_downgrade`) incremented `total` only after a successful
+  fetch, so with `--continue-on-error` a checkpoint/item failing inside the
+  fetch was recorded among the failures without being counted — the summary
+  could report `total < migrated + failed`. `total` now counts every scanned
+  entry, matching the upgrade runners.
 - **Write-back no longer drops `channel_versions` of ephemeral channels.**
   Real LangGraph checkpoints carry versions for channels that have no loaded
   value (`__start__`, `branch:to:*` — consumed and empty at that checkpoint).

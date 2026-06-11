@@ -98,7 +98,8 @@ def __getattr__(name: str) -> Any:
                 # LangGraph rejects updates to undeclared channels, so the fixed
                 # class-level schema would break any custom rev_key.
                 self.state_schema = TypedDict(  # type: ignore[misc]
-                    "_RevisionState", {rev_key: NotRequired[str]}
+                    "_RevisionState",
+                    {rev_key: NotRequired[str]},  # type: ignore[misc]
                 )
 
         def _migrate(self, state: dict[str, Any]) -> dict[str, Any] | None:

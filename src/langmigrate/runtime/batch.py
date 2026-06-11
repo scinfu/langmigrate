@@ -170,11 +170,11 @@ def run_batch_downgrade(
     total = migrated = 0
     failures: list[BatchFailure] = []
     for config in adapter.iter_all_configs():
+        total += 1
         try:
             tup = saver.get_tuple(config)
             if tup is None:
                 continue
-            total += 1
             plan = _plan_downgrade(tup, engine, target, saver)
             if plan is None:
                 continue
@@ -258,11 +258,11 @@ async def arun_batch_downgrade(
     total = migrated = 0
     failures: list[BatchFailure] = []
     async for config in adapter.aiter_all_configs():
+        total += 1
         try:
             tup = await saver.aget_tuple(config)
             if tup is None:
                 continue
-            total += 1
             plan = _plan_downgrade(tup, engine, target, saver)
             if plan is None:
                 continue
@@ -359,11 +359,11 @@ def run_store_batch_downgrade(
     total = migrated = 0
     failures: list[BatchFailure] = []
     for namespace, key in adapter.iter_all_items():
+        total += 1
         try:
             item = store.get(namespace, key)
             if item is None:
                 continue
-            total += 1
             envelope = envelope_from_item_parts(item.value, namespace=namespace, key=key)
             if envelope.revision is None:
                 continue

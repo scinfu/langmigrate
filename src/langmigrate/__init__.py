@@ -36,7 +36,7 @@ from .runtime.factory import setup_langmigrate, setup_langmigrate_store
 from .runtime.interceptor import MigrationInterceptor, OnUnknownRevision
 from .runtime.store import MigrationStore
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 __all__ = [
     "__version__",

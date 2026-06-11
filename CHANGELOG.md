@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] — 2026-06-11
+
+Documentation and packaging metadata only — no code changes.
+
+### Changed
+
+- **README "Symptoms" section** now also covers stale `BaseStore` items
+  (cross-thread memory persisted under an old value shape), with the real
+  traceback, and links the runnable examples.
+- **New "Runnable examples" section** in the README pointing at `examples/`,
+  starting with the LangGraph Studio break-and-heal walkthrough.
+- **Expanded PyPI keywords** (`langchain`, `schema-migration`, `checkpointer`,
+  `store`, `memory`, `persistence`, `agent`, `pydantic`, `postgres`, `redis`, ...)
+  for discoverability.
+
 ## [1.1.0] — 2026-06-10
 
 ### Added

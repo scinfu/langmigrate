@@ -15,6 +15,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from ..config import DEFAULT_CONFIG_FILE, DEFAULT_CONFIG_TOML, LangMigrateConfig
 from ..core.engine import HEAD, MigrationEngine
@@ -390,11 +391,10 @@ def _emit_history(registry: MigrationRegistry) -> None:
             printed.add(rev)
             mig = registry.get(rev)
 
-            rev_display = rev
-            if rev in heads:
-                rev_display = f"[bold green]{rev} (head)[/bold green]"
+            rev_display = Text(f"{rev} (head)", style="bold green") if rev in heads else Text(rev)
 
-            table.add_row(rev_display, _format_parents(mig), mig.slug)
+            # Text cells: slugs are arbitrary strings and must not be parsed as markup.
+            table.add_row(rev_display, Text(_format_parents(mig)), Text(mig.slug))
 
     console.print(table)
 

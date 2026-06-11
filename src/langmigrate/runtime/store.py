@@ -100,8 +100,7 @@ class MigrationStore(BaseStore):
             # In-memory migration only: search enumerates many items and healing
             # here would be a write storm. Use `langmigrate store upgrade`.
             return [
-                self._migrated_view(item) if isinstance(item, Item) else item
-                for item in result
+                self._migrated_view(item) if isinstance(item, Item) else item for item in result
             ]  # type: ignore[return-value]
         return result
 
@@ -113,8 +112,7 @@ class MigrationStore(BaseStore):
             return rebuild_item(result, migrated)
         if isinstance(op, SearchOp) and isinstance(result, list):
             return [
-                self._migrated_view(item) if isinstance(item, Item) else item
-                for item in result
+                self._migrated_view(item) if isinstance(item, Item) else item for item in result
             ]  # type: ignore[return-value]
         return result
 

@@ -7,8 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`on_unknown_revision` policy on the state/middleware path.**
+  `migrate_state_update` and `SchemaMigrationMiddleware` now accept the same
+  `"raise"` | `"warn"` | `"pass"` policy as `MigrationInterceptor` /
+  `MigrationStore`, so a code rollback after a lazy migration no longer has to
+  crash the agent — with `"warn"`/`"pass"` the state is served unmigrated. As in
+  the interceptor, the tolerance covers only the state's own tag; a bad `target`
+  still raises. Default stays `"raise"`. The `OnUnknownRevision` type now lives
+  in `langmigrate.core.types` (still re-exported from the package root and
+  `langmigrate.runtime.interceptor`).
+
 ### Fixed
 
+- **Write-back no longer drops `channel_versions` of ephemeral channels.**
+  Real LangGraph checkpoints carry versions for channels that have no loaded
+  value (`__start__`, `branch:to:*` — consumed and empty at that checkpoint).
+  The version reconciliation rebuilt `channel_versions` from `channel_values`
+  only, so the lazy write-back (and the batch runners) silently removed those
+  entries while `versions_seen` still referenced them — rewriting the checkpoint
+  into a shape LangGraph never produced. Only channels actually dropped by a
+  migration are removed now; version-only channels keep their versions.
+- **`SchemaMigrationMiddleware` is now a stable class object.** The module-level
+  `__getattr__` (PEP 562) rebuilt the class on every attribute access, so two
+  imports yielded *different* classes and `isinstance` checks across them failed
+  silently. The class is built once and cached in the module namespace.
+- **Non-string revision tags no longer crash the state path.**
+  `migrate_state_update` raised a Pydantic `ValidationError` when the state's
+  `langmigrate_rev` value was not a string (e.g. corrupted state); it now treats
+  a non-string tag as untagged, mirroring how the checkpoint path reads
+  `checkpoint.metadata`.
 - **State-level migration no longer loses type-only changes.**
   `migrate_state_update` (and therefore `SchemaMigrationMiddleware`) filtered the
   update with plain `!=`, so a coercion that only changes the type (`1` → `1.0`,

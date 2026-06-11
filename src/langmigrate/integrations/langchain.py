@@ -26,6 +26,7 @@ from typing_extensions import NotRequired, TypedDict
 
 from ..core.engine import HEAD, MigrationEngine
 from ..core.registry import MigrationRegistry
+from ..core.types import OnUnknownRevision
 from .state import DEFAULT_STATE_REV_KEY, OnRemoved, migrate_state_update
 
 
@@ -84,12 +85,14 @@ def __getattr__(name: str) -> Any:
             target: str = HEAD,
             rev_key: str = DEFAULT_STATE_REV_KEY,
             on_removed: OnRemoved = "warn",
+            on_unknown_revision: OnUnknownRevision = "raise",
         ) -> None:
             super().__init__()
             self.engine = _resolve_engine(engine_or_path)
             self.target = target
             self.rev_key = rev_key
             self.on_removed = on_removed
+            self.on_unknown_revision = on_unknown_revision
             if rev_key != DEFAULT_STATE_REV_KEY:
                 # The contributed state channel must match the configured key:
                 # LangGraph rejects updates to undeclared channels, so the fixed
@@ -105,6 +108,7 @@ def __getattr__(name: str) -> Any:
                 target=self.target,
                 rev_key=self.rev_key,
                 on_removed=self.on_removed,
+                on_unknown_revision=self.on_unknown_revision,
             )
 
         def before_agent(self, state: dict[str, Any], runtime: Any = None) -> dict[str, Any] | None:
@@ -123,4 +127,8 @@ def __getattr__(name: str) -> Any:
         ) -> dict[str, Any] | None:
             return self._migrate(state)
 
+    # Cache the class in the module namespace: PEP 562 __getattr__ runs on every
+    # access, and rebuilding would hand out a *different* class object each time,
+    # breaking isinstance checks across imports.
+    globals()["SchemaMigrationMiddleware"] = SchemaMigrationMiddleware
     return SchemaMigrationMiddleware

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator, Iterator, Sequence
-from typing import Any, Literal
+from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -35,13 +35,9 @@ from langgraph.checkpoint.base import (
 
 from ..core.engine import HEAD, MigrationEngine
 from ..core.exceptions import RevisionNotFoundError
+from ..core.types import OnUnknownRevision
 from ..core.version import envelope_from_parts, stamp_metadata
 from .persistence import build_migrated_tuple, changed_versions, put_config
-
-#: Policy for state tagged with a revision the registry does not know (typically a
-#: code rollback after a lazy migration): fail the read, log and serve unmigrated,
-#: or serve unmigrated silently.
-OnUnknownRevision = Literal["raise", "warn", "pass"]
 
 logger = logging.getLogger("langmigrate.runtime")
 

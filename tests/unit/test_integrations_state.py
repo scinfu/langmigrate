@@ -7,7 +7,7 @@ import logging
 import pytest
 
 from langmigrate.core.engine import MigrationEngine
-from langmigrate.core.exceptions import ChannelRemovalUnsupportedError
+from langmigrate.core.exceptions import ChannelRemovalUnsupportedError, RevisionNotFoundError
 from langmigrate.core.migration import BaseMigration
 from langmigrate.core.registry import MigrationRegistry
 from langmigrate.integrations.state import DEFAULT_STATE_REV_KEY, migrate_state_update
@@ -146,3 +146,45 @@ def test_type_only_coercion_is_included_in_update():
 def test_empty_registry_returns_none():
     eng = MigrationEngine(MigrationRegistry.from_migrations([]))
     assert migrate_state_update(eng, {"x": 1}, target="head") is None
+
+
+# --- tag robustness & unknown-revision policy --------------------------------
+
+
+def test_non_string_tag_is_treated_as_untagged():
+    # A corrupted tag (e.g. an int written by a buggy node) must behave like the
+    # checkpoint path's read_revision: untagged, full lineage applied.
+    state = {"msgs": ["hi"], "count": "3", DEFAULT_STATE_REV_KEY: 123}
+    update = migrate_state_update(engine(), state, target="head")
+    assert update is not None
+    assert update[DEFAULT_STATE_REV_KEY] == "v2"
+    assert update["messages"] == ["hi"]
+
+
+def test_unknown_revision_raises_by_default():
+    state = {"messages": ["hi"], DEFAULT_STATE_REV_KEY: "v99"}
+    with pytest.raises(RevisionNotFoundError):
+        migrate_state_update(engine(), state, target="head")
+
+
+def test_unknown_revision_warn_leaves_state_unmigrated(caplog):
+    state = {"messages": ["hi"], DEFAULT_STATE_REV_KEY: "v99"}
+    with caplog.at_level(logging.WARNING, logger="langmigrate.integrations.state"):
+        update = migrate_state_update(engine(), state, target="head", on_unknown_revision="warn")
+    assert update is None
+    assert any("v99" in rec.message for rec in caplog.records)
+
+
+def test_unknown_revision_pass_is_silent(caplog):
+    state = {"messages": ["hi"], DEFAULT_STATE_REV_KEY: "v99"}
+    with caplog.at_level(logging.WARNING, logger="langmigrate.integrations.state"):
+        update = migrate_state_update(engine(), state, target="head", on_unknown_revision="pass")
+    assert update is None
+    assert not caplog.records
+
+
+def test_unknown_target_still_raises_under_tolerant_policy():
+    # The tolerance covers only the state's OWN tag; a bad target is a code bug.
+    state = {"msgs": ["hi"], "count": "3"}
+    with pytest.raises(RevisionNotFoundError):
+        migrate_state_update(engine(), state, target="nope", on_unknown_revision="pass")

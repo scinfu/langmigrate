@@ -9,12 +9,17 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 # Key under which the schema revision tag is stored inside ``checkpoint.metadata``.
 REVISION_METADATA_KEY = "langmigrate_rev"
+
+#: Policy for state tagged with a revision the registry does not know (typically a
+#: code rollback after a lazy migration): fail the read, log and serve the state
+#: unmigrated, or serve it unmigrated silently.
+OnUnknownRevision = Literal["raise", "warn", "pass"]
 
 # Sentinel distinguishing "no literal default given" from ``default=None``. Defined
 # here (rather than in ``operations``) so the fluent ``StateEnvelope`` helpers can

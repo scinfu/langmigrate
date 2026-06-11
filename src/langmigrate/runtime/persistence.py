@@ -31,10 +31,16 @@ def reconcile_versions(
 ) -> dict[str, Any]:
     """Keep versions stable for untouched channels; bump changed/new ones.
 
-    Dropped channels are removed, preserving ``versions_seen`` validity for
-    channels the migration did not touch.
+    Only channels the migration actually dropped (present in ``old_values`` but
+    not in ``new_values``) are removed. Channels that have a version but no
+    loaded value — ephemeral channels like ``__start__`` / ``branch:to:*``,
+    consumed and empty at this checkpoint — are invisible to migrations and must
+    keep their versions: ``versions_seen`` still references them, and dropping
+    them would rewrite the checkpoint into a shape LangGraph never produced.
     """
-    reconciled: dict[str, Any] = {}
+    reconciled: dict[str, Any] = {
+        channel: version for channel, version in old_versions.items() if channel not in old_values
+    }
     for channel, value in new_values.items():
         # Mirror ``coerce_field``'s notion of "changed" recursively: a value that
         # is ``==`` but of a different type at any depth (``1`` -> ``1.0``) is a

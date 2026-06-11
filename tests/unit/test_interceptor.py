@@ -78,6 +78,33 @@ def test_write_back_persists_and_second_load_is_noop():
     assert again.checkpoint["channel_values"] == raw.checkpoint["channel_values"]
 
 
+def test_write_back_preserves_version_only_channels():
+    # Real graph checkpoints carry versions for ephemeral channels (__start__,
+    # branch:to:*) that have no loaded value. Migrations never see them, so the
+    # write-back must keep their versions: versions_seen still references them.
+    saver = InMemorySaver()
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    chk: Checkpoint = empty_checkpoint()
+    chk["channel_values"] = {"msgs": ["hi"], "count": 1}
+    chk["channel_versions"] = {"msgs": 1, "count": 1, "__start__": 1, "branch:to:a": 2}
+    saver.put(
+        config, chk, {"source": "loop"}, {"msgs": 1, "count": 1, "__start__": 1, "branch:to:a": 2}
+    )
+
+    interceptor = MigrationInterceptor(saver, engine())
+    interceptor.get_tuple({"configurable": {"thread_id": "t1", "checkpoint_ns": ""}})
+
+    raw = saver.get_tuple({"configurable": {"thread_id": "t1", "checkpoint_ns": ""}})
+    versions = raw.checkpoint["channel_versions"]
+    # Ephemeral channels keep their versions untouched...
+    assert versions["__start__"] == 1
+    assert versions["branch:to:a"] == 2
+    # ...while the rename drops the old key's version and versions the new key.
+    assert "msgs" not in versions
+    assert "messages" in versions
+    assert "context" in versions
+
+
 def test_write_back_disabled_does_not_touch_db():
     saver = InMemorySaver()
     write_legacy_checkpoint(saver, "t1")

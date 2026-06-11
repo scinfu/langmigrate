@@ -24,9 +24,9 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from ..core.engine import HEAD, MigrationEngine
-from ..core.exceptions import ChannelRemovalUnsupportedError
+from ..core.exceptions import ChannelRemovalUnsupportedError, RevisionNotFoundError
 from ..core.operations import strict_equal
-from ..core.types import StateEnvelope
+from ..core.types import OnUnknownRevision, StateEnvelope
 
 DEFAULT_STATE_REV_KEY = "langmigrate_rev"
 
@@ -42,11 +42,13 @@ def migrate_state_update(
     target: str = HEAD,
     rev_key: str = DEFAULT_STATE_REV_KEY,
     on_removed: OnRemoved = "warn",
+    on_unknown_revision: OnUnknownRevision = "raise",
 ) -> dict[str, Any] | None:
     """Migrate ``state`` and return the update to merge, or ``None`` if up to date.
 
     The reserved ``rev_key`` is read from and written back into the state. Only
-    added/changed channels are returned (plus the new tag).
+    added/changed channels are returned (plus the new tag). A non-string tag is
+    treated as untagged, mirroring how the checkpoint path reads metadata.
 
     ``on_removed`` controls what happens when the migration removes channels
     (rename/drop) — which cannot be applied via a merged state update:
@@ -55,6 +57,12 @@ def migrate_state_update(
     - ``"error"``: raise :class:`ChannelRemovalUnsupportedError`.
     - ``"ignore"``: proceed silently.
 
+    ``on_unknown_revision`` governs a tag the registry does not know (typically a
+    code rollback after a lazy migration): ``"raise"`` (default) fails,
+    ``"warn"``/``"pass"`` leave the state unmigrated (returning ``None``). As in
+    the interceptor, the tolerance applies only to the state's own tag — a bad
+    ``target`` still raises.
+
     With an empty registry (no revisions yet) there is nothing to migrate to, so
     the state is left untouched and ``None`` is returned.
     """
@@ -62,8 +70,22 @@ def migrate_state_update(
         return None
     values = dict(state)
     current_rev = values.pop(rev_key, None)
+    if not isinstance(current_rev, str):
+        current_rev = None
     envelope = StateEnvelope(values=values, revision=current_rev)
-    migrated = engine.upgrade_state(envelope, target)
+    try:
+        migrated = engine.upgrade_state(envelope, target)
+    except RevisionNotFoundError as exc:
+        if on_unknown_revision == "raise" or exc.revision != envelope.revision:
+            raise
+        if on_unknown_revision == "warn":
+            logger.warning(
+                "langmigrate: state carries unknown revision %r (not in the registry); "
+                "leaving it unmigrated. This usually means the code was rolled back "
+                "after a lazy migration.",
+                exc.revision,
+            )
+        return None
     if migrated is envelope:
         return None
 

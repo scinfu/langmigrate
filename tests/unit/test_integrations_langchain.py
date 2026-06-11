@@ -80,7 +80,14 @@ def stub_langchain(monkeypatch):
     monkeypatch.setitem(sys.modules, "langchain", langchain)
     monkeypatch.setitem(sys.modules, "langchain.agents", agents)
     monkeypatch.setitem(sys.modules, "langchain.agents.middleware", middleware)
-    return AgentMiddleware
+    # The class is cached in the module namespace on first access (PEP 562
+    # __getattr__ no longer rebuilds it every time); drop any cached copy so it
+    # rebuilds against this stub, and clean up afterwards so later tests rebuild
+    # against whatever langchain is really installed.
+    lcmod = importlib.import_module("langmigrate.integrations.langchain")
+    lcmod.__dict__.pop("SchemaMigrationMiddleware", None)
+    yield AgentMiddleware
+    lcmod.__dict__.pop("SchemaMigrationMiddleware", None)
 
 
 def _engine():
@@ -112,6 +119,30 @@ async def test_middleware_async_hooks_migrate(stub_langchain):
     update = await mw.abefore_agent({"msgs": ["hi"], "count": 1})
     assert update["messages"] == ["hi"]
     assert update["langmigrate_rev"] == "v2"
+
+
+def test_middleware_class_identity_is_stable(stub_langchain):
+    # Regression: __getattr__ used to rebuild the class on every access, so two
+    # imports yielded different classes and isinstance checks failed silently.
+    mod = importlib.import_module("langmigrate.integrations.langchain")
+    first = mod.SchemaMigrationMiddleware
+    second = mod.SchemaMigrationMiddleware
+    assert first is second
+    assert isinstance(first(_engine()), second)
+
+
+def test_middleware_unknown_revision_policy_forwarded(stub_langchain):
+    mod = importlib.import_module("langmigrate.integrations.langchain")
+    rolled_back = {"messages": ["hi"], "langmigrate_rev": "v99"}
+
+    from langmigrate.core.exceptions import RevisionNotFoundError
+
+    strict = mod.SchemaMigrationMiddleware(_engine())
+    with pytest.raises(RevisionNotFoundError):
+        strict.before_agent(dict(rolled_back))
+
+    tolerant = mod.SchemaMigrationMiddleware(_engine(), on_unknown_revision="pass")
+    assert tolerant.before_agent(dict(rolled_back)) is None
 
 
 def test_custom_rev_key_declares_matching_channel(stub_langchain):

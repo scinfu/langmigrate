@@ -1,0 +1,9 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "chat": "studio_graphs.chat.graph:graph",
+    "agent": "studio_graphs.agent.graph:graph",
+    "memory": "studio_graphs.memory.graph:graph"
+  },
+  "python_version": "3.12"
+}

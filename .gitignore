@@ -34,3 +34,7 @@ htmlcov/
 langmigrate.toml
 migrations/
 !examples/**/migrations/
+
+# LangGraph dev server persistence (examples/studio)
+.langgraph_api/
+.env

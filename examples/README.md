@@ -18,6 +18,7 @@ uv run python examples/quickstart/main.py # the quickstart
 | [`multi_tool_agent`](multi_tool_agent/) | Online lazy (StateGraph) | 3-revision cascade, rename, require_field, type coercion |
 | [`deep_research_agent`](deep_research_agent/) | Advanced / supervisor | NodeRemap, IrreversibleMigrationError, staged partial upgrade |
 | [`batch_migration`](batch_migration/) | Offline proactive batch | `run_batch_upgrade`, `run_batch_downgrade`, dry-run, InMemoryAdapter |
+| [`studio`](studio/) | **LangGraph Studio** (managed platform) | Real `langgraph.json` project: break threads/store items live in Studio, then heal them — migrate node, `SchemaMigrationMiddleware`, `MigrationStore` |
 
 ## Which pattern should I use?
 
@@ -25,9 +26,10 @@ uv run python examples/quickstart/main.py # the quickstart
 Do you own the checkpointer?
 ├── Yes → MigrationInterceptor (evolving_agent, multi_tool_agent)
 │         └── Need bulk pre-release cure? → run_batch_upgrade (batch_migration)
-└── No  → LangGraph Server / Cloud?
-          ├── Has middleware stack → SchemaMigrationMiddleware (middleware_agent)
-          └── Manual graph control → migrate_state_update node (middleware_agent)
+└── No  → LangGraph Server / Cloud / Studio?
+          ├── Has middleware stack → SchemaMigrationMiddleware (middleware_agent, studio)
+          ├── Manual graph control → migrate_state_update node (middleware_agent, studio)
+          └── Store items (cross-thread memory) → MigrationStore (studio)
 ```
 
 Special cases:

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "langmigrate-studio-examples"
+version = "0.1.0"
+description = "LangGraph Studio examples for LangMigrate (schema evolution + lazy migration, live in Studio)."
+requires-python = ">=3.11"
+dependencies = [
+    "langmigrate",
+    "langgraph>=1.0",
+    "langchain>=1.0",
+    "langchain-anthropic>=1.0",
+    "langgraph-cli[inmem]>=0.2",
+]
+
+[tool.uv.sources]
+langmigrate = { path = "../..", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["studio_graphs"]

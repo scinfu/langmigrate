@@ -90,6 +90,13 @@ def __getattr__(name: str) -> Any:
             self.target = target
             self.rev_key = rev_key
             self.on_removed = on_removed
+            if rev_key != DEFAULT_STATE_REV_KEY:
+                # The contributed state channel must match the configured key:
+                # LangGraph rejects updates to undeclared channels, so the fixed
+                # class-level schema would break any custom rev_key.
+                self.state_schema = TypedDict(  # type: ignore[misc]
+                    "_RevisionState", {rev_key: NotRequired[str]}
+                )
 
         def _migrate(self, state: dict[str, Any]) -> dict[str, Any] | None:
             return migrate_state_update(

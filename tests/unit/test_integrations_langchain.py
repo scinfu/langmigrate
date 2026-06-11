@@ -112,3 +112,18 @@ async def test_middleware_async_hooks_migrate(stub_langchain):
     update = await mw.abefore_agent({"msgs": ["hi"], "count": 1})
     assert update["messages"] == ["hi"]
     assert update["langmigrate_rev"] == "v2"
+
+
+def test_custom_rev_key_declares_matching_channel(stub_langchain):
+    # The contributed state channel must follow rev_key, or LangGraph would
+    # reject the update as targeting an undeclared channel.
+    mod = importlib.import_module("langmigrate.integrations.langchain")
+    mw = mod.SchemaMigrationMiddleware(_engine(), rev_key="__rev__")
+    assert "__rev__" in mw.state_schema.__annotations__
+
+    update = mw.before_agent({"msgs": ["hi"], "count": 1})
+    assert update["__rev__"] == "v2"
+
+    # The default key keeps the class-level schema untouched.
+    default = mod.SchemaMigrationMiddleware(_engine())
+    assert "langmigrate_rev" in default.state_schema.__annotations__

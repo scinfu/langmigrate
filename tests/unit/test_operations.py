@@ -84,6 +84,13 @@ def test_rename_field_same_value_collision_is_noop_safe():
     assert out.values == {"new": 2}
 
 
+def test_rename_field_type_only_collision_raises():
+    # 1 vs 1.0 compare `==` but the persisted blobs differ: overwriting the
+    # target would silently alter data, so it must be treated as a conflict.
+    with pytest.raises(UnsafeMigrationError):
+        ops.rename_field(env(old=1, new=1.0), "old", "new")
+
+
 # --- coerce_field (Unsafe) ------------------------------------------------
 
 

@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **State-level migration no longer loses type-only changes.**
+  `migrate_state_update` (and therefore `SchemaMigrationMiddleware`) filtered the
+  update with plain `!=`, so a coercion that only changes the type (`1` → `1.0`,
+  `True` → `1`) was dropped from the update while the state was still stamped
+  with the new revision — silently losing the migration. The update diff now
+  uses the same strict deep-equality as the checkpoint write-back path.
+- **Empty registry no longer breaks the wrapped saver/store.** With no revisions
+  yet (e.g. right after `langmigrate init`), `MigrationInterceptor` raised
+  `MultipleHeadsError` on every `put` (and on reads of existing checkpoints)
+  while resolving the head. `MigrationInterceptor`, `MigrationStore` and
+  `migrate_state_update` are now transparent pass-throughs when the registry is
+  empty: nothing is stamped, nothing is migrated.
+- **`SchemaMigrationMiddleware` honors a custom `rev_key`.** The contributed
+  `state_schema` always declared the default `langmigrate_rev` channel, so a
+  custom `rev_key` produced updates to an undeclared channel (rejected by
+  LangGraph). The middleware now declares the channel matching the configured
+  key.
+- **`rename_field` treats a type-only collision as a conflict.** When both keys
+  existed with values that compare `==` but differ in type at any depth
+  (`1` vs `1.0`), the target value was silently overwritten; it now raises
+  `UnsafeMigrationError`, consistent with the strict-equality semantics used
+  everywhere else.
+- **`PostgresStoreAdapter.stamp_all` guards against JSON `null` values.**
+  `jsonb_set` of a null base returns null and would silently drop the tag; the
+  store stamp now uses the same `COALESCE(NULLIF(...))` guard as the checkpoint
+  adapter.
+
 ## [1.1.1] — 2026-06-11
 
 Documentation and packaging metadata only — no code changes.

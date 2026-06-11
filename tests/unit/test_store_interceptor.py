@@ -188,3 +188,17 @@ def test_namespace_dispatch_in_migrations():
 
     assert store.get(NS, "m1").value == {"text": "x", "kind": "memory"}
     assert store.get(("other",), "o1").value == {"text": "y"}
+
+
+# --- empty registry (no revisions yet) --------------------------------------
+
+
+def test_empty_registry_is_passthrough():
+    raw = InMemoryStore()
+    store = MigrationStore(raw, MigrationEngine(MigrationRegistry.from_migrations([])))
+
+    store.put(NS, "m1", {"msgs": ["hi"]})
+
+    # Neither tagged on write nor migrated on read.
+    assert raw.get(NS, "m1").value == {"msgs": ["hi"]}
+    assert store.get(NS, "m1").value == {"msgs": ["hi"]}

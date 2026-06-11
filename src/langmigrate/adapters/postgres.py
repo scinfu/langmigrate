@@ -298,11 +298,17 @@ class PostgresStoreAdapter:
             last = (rows[-1]["prefix"], rows[-1]["key"])
 
     def stamp_all(self, revision: str) -> int:
-        """Set the revision tag inside every item's value without migrating."""
+        """Set the revision tag inside every item's value without migrating.
+
+        ``COALESCE`` guards against a row whose ``value`` is SQL/JSON ``null``
+        (``jsonb_set`` of a null base returns null and would silently drop the
+        tag), mirroring :meth:`PostgresAdapter.stamp_all`.
+        """
         with self._conn.cursor() as cur:
             cur.execute(
                 "UPDATE store SET value = "
-                f"jsonb_set(value, '{{{REVISION_METADATA_KEY}}}', to_jsonb(%s::text))",
+                "jsonb_set(COALESCE(NULLIF(value, 'null'::jsonb), '{}'::jsonb), "
+                f"'{{{REVISION_METADATA_KEY}}}', to_jsonb(%s::text))",
                 (revision,),
             )
             return int(cur.rowcount or 0)

@@ -42,7 +42,12 @@ from .interceptor import OnUnknownRevision, logger
 
 
 class MigrationStore(BaseStore):
-    """Wrap a store to migrate item values lazily on read and tag them on write."""
+    """Wrap a store to migrate item values lazily on read and tag them on write.
+
+    With an **empty registry** (no revisions yet) the wrapper is a transparent
+    pass-through: there is no head to resolve, so values are neither tagged nor
+    migrated.
+    """
 
     def __init__(
         self,
@@ -81,6 +86,9 @@ class MigrationStore(BaseStore):
 
     def _prepare(self, ops: list[Op]) -> list[Op]:
         """Stamp outgoing PutOp values with the resolved target revision."""
+        if not len(self.engine.registry):
+            # No revisions yet: there is no head to stamp (resolving it would raise).
+            return ops
         prepared: list[Op] = []
         for op in ops:
             if isinstance(op, PutOp) and op.value is not None:
@@ -119,6 +127,8 @@ class MigrationStore(BaseStore):
     def _migrate_item(self, item: Item) -> tuple[StateEnvelope, bool]:
         """Return (migrated envelope, whether the cascade changed anything)."""
         envelope = envelope_from_item_parts(item.value, namespace=item.namespace, key=item.key)
+        if not len(self.engine.registry):
+            return envelope, False
         try:
             migrated = self.engine.upgrade_state(envelope, self.target)
         except RevisionNotFoundError as exc:

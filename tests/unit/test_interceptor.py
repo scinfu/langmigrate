@@ -469,3 +469,26 @@ def test_lazy_upgrade_through_merge_revision():
     # Idempotent second read.
     again = interceptor.get_tuple(cfg)
     assert again.checkpoint["channel_values"] == tup.checkpoint["channel_values"]
+
+
+# --- empty registry (no revisions yet) --------------------------------------
+
+
+def test_empty_registry_is_passthrough():
+    # Right after `langmigrate init` there are no revisions: the interceptor must
+    # not break the app (resolving the head would raise MultipleHeadsError).
+    saver = InMemorySaver()
+    interceptor = MigrationInterceptor(
+        saver, MigrationEngine(MigrationRegistry.from_migrations([]))
+    )
+
+    config = {"configurable": {"thread_id": "t0", "checkpoint_ns": ""}}
+    chk: Checkpoint = empty_checkpoint()
+    chk["channel_values"] = {"msgs": ["hi"]}
+    chk["channel_versions"] = {"msgs": 1}
+    interceptor.put(config, chk, {"source": "loop"}, {"msgs": 1})
+
+    tup = interceptor.get_tuple({"configurable": {"thread_id": "t0", "checkpoint_ns": ""}})
+    assert tup is not None
+    assert tup.checkpoint["channel_values"] == {"msgs": ["hi"]}
+    assert REVISION_METADATA_KEY not in tup.metadata

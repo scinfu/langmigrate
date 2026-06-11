@@ -75,14 +75,15 @@ def rename_field(state: StateEnvelope, old: str, new: str) -> StateEnvelope:
     """Unsafe: remap key ``old`` -> ``new`` without losing the value.
 
     Idempotent — if ``old`` is already gone the state is returned unchanged. Raises
-    :class:`UnsafeMigrationError` if both keys are present with differing values, as
-    that would silently drop data.
+    :class:`UnsafeMigrationError` if both keys are present with differing values
+    (a type change at any depth counts as a difference, as in :func:`strict_equal`),
+    as that would silently drop data.
     """
     if old == new:
         return state
     if old not in state.values:
         return state
-    if new in state.values and state.values[new] != state.values[old]:
+    if new in state.values and not strict_equal(state.values[new], state.values[old]):
         raise UnsafeMigrationError(
             f"Cannot rename {old!r} -> {new!r}: target already exists with a different value",
             field=new,

@@ -117,3 +117,32 @@ def test_pure_addition_does_not_warn(caplog):
         update = migrate_state_update(only_v1, {"count": 1}, target="head")
     assert update["context"] == {}
     assert not caplog.records
+
+
+# --- strict change detection & empty registry -------------------------------
+
+
+class _ToFloat(BaseMigration):
+    revision = "f1"
+    down_revision = None
+
+    def upgrade(self, state):
+        return self.coerce_field(state, "score", float, skip_if=lambda v: isinstance(v, float))
+
+    def downgrade(self, state):
+        return self.coerce_field(state, "score", int, skip_if=lambda v: isinstance(v, int))
+
+
+def test_type_only_coercion_is_included_in_update():
+    # 1 -> 1.0 compares `==` but is a real change; dropping it from the update
+    # while stamping the new revision would silently lose the migration.
+    eng = MigrationEngine(MigrationRegistry.from_migrations([_ToFloat()]))
+    update = migrate_state_update(eng, {"score": 1}, target="head")
+    assert update is not None
+    assert isinstance(update["score"], float)
+    assert update[DEFAULT_STATE_REV_KEY] == "f1"
+
+
+def test_empty_registry_returns_none():
+    eng = MigrationEngine(MigrationRegistry.from_migrations([]))
+    assert migrate_state_update(eng, {"x": 1}, target="head") is None

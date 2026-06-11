@@ -25,6 +25,7 @@ from typing import Any, Literal
 
 from ..core.engine import HEAD, MigrationEngine
 from ..core.exceptions import ChannelRemovalUnsupportedError
+from ..core.operations import strict_equal
 from ..core.types import StateEnvelope
 
 DEFAULT_STATE_REV_KEY = "langmigrate_rev"
@@ -53,7 +54,12 @@ def migrate_state_update(
     - ``"warn"`` (default): log a warning and proceed (old key lingers).
     - ``"error"``: raise :class:`ChannelRemovalUnsupportedError`.
     - ``"ignore"``: proceed silently.
+
+    With an empty registry (no revisions yet) there is nothing to migrate to, so
+    the state is left untouched and ``None`` is returned.
     """
+    if not len(engine.registry):
+        return None
     values = dict(state)
     current_rev = values.pop(rev_key, None)
     envelope = StateEnvelope(values=values, revision=current_rev)
@@ -73,10 +79,13 @@ def migrate_state_update(
                 removed,
             )
 
+    # Strict (deep, type-aware) comparison: a coercion like 1 -> 1.0 compares ``==``
+    # but is a real change; plain ``!=`` would drop it from the update while the
+    # state is still stamped as migrated, silently losing the migration.
     update: dict[str, Any] = {
         key: value
         for key, value in migrated.values.items()
-        if key not in values or values[key] != value
+        if key not in values or not strict_equal(values[key], value)
     }
     update[rev_key] = migrated.revision
     return update

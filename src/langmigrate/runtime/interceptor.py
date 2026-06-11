@@ -47,7 +47,12 @@ logger = logging.getLogger("langmigrate.runtime")
 
 
 class MigrationInterceptor(BaseCheckpointSaver):
-    """Wrap a checkpointer to migrate state lazily on load and tag it on write."""
+    """Wrap a checkpointer to migrate state lazily on load and tag it on write.
+
+    With an **empty registry** (no revisions yet — e.g. right after ``langmigrate
+    init``) the interceptor is a transparent pass-through: there is no head to
+    resolve, so nothing is stamped and nothing is migrated.
+    """
 
     def __init__(
         self,
@@ -177,10 +182,15 @@ class MigrationInterceptor(BaseCheckpointSaver):
 
     def _stamp(self, metadata: CheckpointMetadata) -> CheckpointMetadata:
         """Tag outgoing metadata with the resolved head revision."""
+        if not len(self.engine.registry):
+            # No revisions yet: there is no head to stamp (resolving it would raise).
+            return metadata
         return stamp_metadata(dict(metadata or {}), self.engine.resolve_target(self.target))  # type: ignore[return-value]
 
     def _migrate_tuple(self, tup: CheckpointTuple) -> tuple[CheckpointTuple, bool]:
         """Return (possibly migrated tuple, whether anything changed)."""
+        if not len(self.engine.registry):
+            return tup, False
         envelope = envelope_from_parts(tup.checkpoint["channel_values"], dict(tup.metadata or {}))
         try:
             migrated = self.engine.upgrade_state(envelope, self.target)

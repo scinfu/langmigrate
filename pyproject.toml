@@ -10,7 +10,25 @@ readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 authors = [{ name = "Nabil Chatbi" }]
-keywords = ["langgraph", "migration", "checkpoint", "schema", "alembic", "state"]
+keywords = [
+    "langgraph",
+    "langchain",
+    "migration",
+    "schema-migration",
+    "data-migration",
+    "checkpoint",
+    "checkpointer",
+    "store",
+    "memory",
+    "persistence",
+    "schema",
+    "alembic",
+    "state",
+    "agent",
+    "pydantic",
+    "postgres",
+    "redis",
+]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",

@@ -61,6 +61,27 @@ interrupted thread blow up on resume. If any of these look familiar, LangMigrate
   (state key) changed shape or type between deploys.
 - **Old checkpoints fail to deserialize** with `JsonPlusSerializer` / msgpack after a
   `TypedDict` or Pydantic state model changed (added, dropped, renamed, or retyped fields).
+- **Long-term memory items (`BaseStore`) break too** — `KeyError` / `TypeError` inside a
+  node reading a cross-thread memory item (`store.get(...)` / `store.search(...)`) whose
+  value was saved under an old shape (e.g. flat `{"name": ...}` where the new code expects
+  nested `{"profile": {...}}`):
+
+  ```text
+    File ".../langgraph/pregel/_retry.py", line 617, in run_with_retry
+      return task.proc.invoke(task.input, config)
+    File ".../langgraph/_internal/_runnable.py", line 426, in invoke
+      ret = self.func(*args, **kwargs)
+    File "my_app/nodes.py", line 14, in respond
+      name = item.value["profile"]["name"]
+  KeyError: 'profile'
+  During task with name 'respond' and id '56c4b765-6d5c-021a-5351-ede94b08ecb2'
+  ```
+
+  Store items outlive any single thread, so one schema change breaks **every** thread that
+  reads the shared item — including brand-new ones, which makes it look like a random
+  regression rather than a persistence problem. Checkpoint fixes don't help here;
+  LangMigrate's `MigrationStore` wrapper migrates items on read (and heals them in place
+  on `get()`).
 - **Resuming an interrupted thread after a graph refactor silently loses work** — the
   scariest variant, because there is *no* exception. A thread paused mid-node (e.g. on a
   human-in-the-loop `interrupt()`) is resumed on code where that node was renamed or removed;
@@ -70,9 +91,10 @@ interrupted thread blow up on resume. If any of these look familiar, LangMigrate
 - **"It worked before the deploy"** — Postgres/Redis checkpointer threads created on an
   older schema crash, silently lose data, or corrupt state on the new code.
 
-These are all the same root cause: a LangGraph **checkpointer persisted state under an old
-schema**, and your new code can't read it. LangMigrate versions and migrates that state the
-way Alembic does for SQL — see below.
+These are all the same root cause: a LangGraph **checkpointer or store persisted state under
+an old schema**, and your new code can't read it. LangMigrate versions and migrates that
+state the way Alembic does for SQL — see below. Every symptom above is reproducible (and
+fixable) hands-on in the [runnable examples](#runnable-examples).
 
 ## Compatibility matrix
 
@@ -183,6 +205,17 @@ uv run langmigrate store upgrade head    # proactive batch (Postgres)
 ```bash
 uv run langmigrate merge -m "join heads"   # down_revision = ("head_a", "head_b")
 ```
+
+## Runnable examples
+
+The [`examples/`](./examples/) directory has end-to-end demos of every integration path,
+each with its own README and a decision tree to pick the right one. If you want to *see*
+the failure before fixing it, start with the
+[LangGraph Studio walkthrough](./examples/studio/README.md): a real `langgraph.json`
+project where you break checkpointed threads and shared store items live in Studio
+(`ValidationError` on resume after adding a required field, `KeyError` after a rename,
+a store item stuck on the old value shape) and then heal each one with the migrate node,
+`SchemaMigrationMiddleware`, or `MigrationStore`.
 
 ## Design
 

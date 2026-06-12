@@ -67,6 +67,15 @@ def build_migrated_tuple(
 ) -> CheckpointTuple:
     """Return a new tuple carrying the migrated values, versions and revision tag.
 
+    ``versions_seen`` is preserved as-is: it is a ``dict[node_id,
+    dict[channel, version]]`` keyed by *node* ID (not by channel) — see
+    ``langgraph.checkpoint.base.Checkpoint.versions_seen`` — and LangGraph
+    re-aligns ``versions_seen[INTERRUPT]`` on every resume from the current
+    ``channel_versions`` (``pregel/_loop.py:935-939``), so a migration that
+    bumps a channel does not need to (and must not attempt to) rewrite
+    ``versions_seen`` directly. Untouched channels keep their existing
+    entries; touched channels are re-aligned by LangGraph at resume time.
+
     ``pending_writes`` are passed through untouched (single-channel fragments —
     see the limitation note in :mod:`langmigrate.runtime.interceptor`).
     """

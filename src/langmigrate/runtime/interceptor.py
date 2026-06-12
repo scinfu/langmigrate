@@ -10,6 +10,17 @@ the checkpoint ``id`` and the ``parent_config`` chain are preserved, and only
 channels whose value actually changed get a bumped version (so ``versions_seen``
 stays valid for untouched channels).
 
+Concurrency: the write-back in ``get_tuple``/``aget_tuple`` is **not atomic**
+with the read — there is a read-modify-write window during which a concurrent
+``put`` on the same thread (e.g. a parallel resume, or a worker that resumes
+while the batch runner is also touching the thread) can be silently
+overwritten, or have its ``channel_versions`` not be reflected in the migration
+put. Single-writer per thread is the required invariant. Production deployments
+with multiple workers resuming the same thread (or with the batch runner
+running on a live DB) should either serialize access to that thread or disable
+write-back (``write_back=False``) and let the batch runner cure the DB
+explicitly.
+
 Limitations: ``pending_writes`` are passed through untouched. They are
 single-channel fragments, so running the whole-state cascade over them would
 mis-fire (``add_field``/``require_field`` would fabricate channels), and there is
@@ -78,6 +89,10 @@ class MigrationInterceptor(BaseCheckpointSaver):
             return None
         migrated, changed = self._migrate_tuple(tup)
         if changed and self.write_back:
+            # NOTE: this is a read-modify-write under the saver's own locking,
+            # not an atomic compare-and-set. See the module docstring's
+            # "Concurrency" section: a concurrent ``put`` on the same thread
+            # between this read and write can be silently overwritten.
             self.saver.put(
                 put_config(migrated),
                 migrated.checkpoint,
@@ -92,6 +107,7 @@ class MigrationInterceptor(BaseCheckpointSaver):
             return None
         migrated, changed = self._migrate_tuple(tup)
         if changed and self.write_back:
+            # See ``get_tuple`` for the concurrency caveat.
             await self.saver.aput(
                 put_config(migrated),
                 migrated.checkpoint,

@@ -178,6 +178,11 @@ class FunctionMigration(BaseMigration):
         branch_labels: tuple[str, ...] = (),
         fields: dict[str, str] | None = None,
     ) -> None:
+        if not isinstance(revision, str):
+            raise TypeError(
+                f"@migration requires a string revision id, got {revision!r} "
+                f"(type {type(revision).__name__})"
+            )
         if not revision:
             raise ValueError("@migration requires a non-empty revision id")
         self.revision = revision

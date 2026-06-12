@@ -24,9 +24,13 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from ..core.engine import HEAD, MigrationEngine
-from ..core.exceptions import ChannelRemovalUnsupportedError, RevisionNotFoundError
+from ..core.exceptions import (
+    ChannelRemovalUnsupportedError,
+    ReservedKeyCollisionError,
+    RevisionNotFoundError,
+)
 from ..core.operations import strict_equal
-from ..core.types import OnUnknownRevision, StateEnvelope
+from ..core.types import OnReservedKeyCollision, OnUnknownRevision, StateEnvelope
 
 DEFAULT_STATE_REV_KEY = "langmigrate_rev"
 
@@ -43,6 +47,7 @@ def migrate_state_update(
     rev_key: str = DEFAULT_STATE_REV_KEY,
     on_removed: OnRemoved = "warn",
     on_unknown_revision: OnUnknownRevision = "raise",
+    on_reserved_key_collision: OnReservedKeyCollision = "warn",
 ) -> dict[str, Any] | None:
     """Migrate ``state`` and return the update to merge, or ``None`` if up to date.
 
@@ -63,12 +68,34 @@ def migrate_state_update(
     the interceptor, the tolerance applies only to the state's own tag — a bad
     ``target`` still raises.
 
+    ``on_reserved_key_collision`` is the analog of the store's policy: if the
+    application stores a value under ``rev_key`` (besides the tag itself),
+    the update would overwrite it. ``"warn"`` (default) logs and proceeds;
+    ``"error"`` raises :class:`ReservedKeyCollisionError`.
+
     With an empty registry (no revisions yet) there is nothing to migrate to, so
     the state is left untouched and ``None`` is returned.
     """
     if not len(engine.registry):
         return None
     values = dict(state)
+    # Collision check on ``rev_key`` *before* we pop it. We only fire when the
+    # value is clearly *user data*: a string at this key is, by convention, a
+    # tag — even an unknown one, governed by ``on_unknown_revision`` — and
+    # ``None`` is what a declared-but-unset state channel holds (TypedDict
+    # defaults), carrying no data worth protecting. Renaming the field is the
+    # only safe fix for a real collision.
+    if rev_key in state and state[rev_key] is not None and not isinstance(state[rev_key], str):
+        existing = state[rev_key]
+        if on_reserved_key_collision == "error":
+            raise ReservedKeyCollisionError(rev_key)
+        logger.warning(
+            "langmigrate: state carries a non-string value under the reserved "
+            "rev_key %r (value: %r); the migration update will overwrite it. "
+            "Rename your field to avoid the collision.",
+            rev_key,
+            existing,
+        )
     current_rev = values.pop(rev_key, None)
     if not isinstance(current_rev, str):
         current_rev = None

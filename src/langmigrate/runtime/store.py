@@ -35,9 +35,15 @@ from langgraph.store.base import (
 )
 
 from ..core.engine import HEAD, MigrationEngine
-from ..core.exceptions import RevisionNotFoundError
-from ..core.types import StateEnvelope
-from ..core.version import envelope_from_item_parts, stamp_value, strip_value_tag, value_for
+from ..core.exceptions import ReservedKeyCollisionError, RevisionNotFoundError
+from ..core.types import OnReservedKeyCollision, StateEnvelope
+from ..core.version import (
+    REVISION_METADATA_KEY,
+    envelope_from_item_parts,
+    stamp_value,
+    strip_value_tag,
+    value_for,
+)
 from .interceptor import OnUnknownRevision, logger
 
 
@@ -57,12 +63,14 @@ class MigrationStore(BaseStore):
         write_back: bool = True,
         target: str = HEAD,
         on_unknown_revision: OnUnknownRevision = "raise",
+        on_reserved_key_collision: OnReservedKeyCollision = "warn",
     ) -> None:
         self.store = store
         self.engine = engine
         self.write_back = write_back
         self.target = target
         self.on_unknown_revision = on_unknown_revision
+        self.on_reserved_key_collision = on_reserved_key_collision
         # Mirror the wrapped store's TTL surface so ttl= arguments validate alike.
         self.supports_ttl = store.supports_ttl
         self.ttl_config = store.ttl_config
@@ -92,8 +100,22 @@ class MigrationStore(BaseStore):
         prepared: list[Op] = []
         for op in ops:
             if isinstance(op, PutOp) and op.value is not None:
+                value_dict = dict(op.value)
+                if REVISION_METADATA_KEY in value_dict:
+                    # The application has a field literally named
+                    # ``langmigrate_rev`` — stamping would silently overwrite
+                    # it. Surface the collision per the configured policy.
+                    msg = (
+                        f"store item {op.namespace}/{op.key} carries a value "
+                        f"under the reserved key {REVISION_METADATA_KEY!r}; "
+                        f"the stamp will overwrite it. Rename your field to "
+                        f"avoid the collision."
+                    )
+                    if self.on_reserved_key_collision == "error":
+                        raise ReservedKeyCollisionError(REVISION_METADATA_KEY)
+                    logger.warning(msg)
                 target_rev = self.engine.resolve_target(self.target)
-                prepared.append(op._replace(value=stamp_value(dict(op.value), target_rev)))
+                prepared.append(op._replace(value=stamp_value(value_dict, target_rev)))
             else:
                 prepared.append(op)
         return prepared
@@ -126,9 +148,14 @@ class MigrationStore(BaseStore):
 
     def _migrate_item(self, item: Item) -> tuple[StateEnvelope, bool]:
         """Return (migrated envelope, whether the cascade changed anything)."""
-        envelope = envelope_from_item_parts(item.value, namespace=item.namespace, key=item.key)
-        if not len(self.engine.registry):
+        # ``value=None`` cannot come from LangGraph's own stores (PutOp with
+        # value=None means delete) but external/custom BaseStore
+        # implementations can return it; preserve it as-is — never fabricate
+        # fields the user never stored. The empty registry case is also a no-op.
+        if item.value is None or not len(self.engine.registry):
+            envelope = envelope_from_item_parts(item.value, namespace=item.namespace, key=item.key)
             return envelope, False
+        envelope = envelope_from_item_parts(item.value, namespace=item.namespace, key=item.key)
         try:
             migrated = self.engine.upgrade_state(envelope, self.target)
         except RevisionNotFoundError as exc:
@@ -152,8 +179,13 @@ class MigrationStore(BaseStore):
 
 
 def rebuild_item(item: Item, envelope: StateEnvelope) -> Item:
-    """Item carrying the envelope's (tag-free) values; preserves identity fields."""
-    values = strip_value_tag(envelope.values)
+    """Item carrying the envelope's (tag-free) values; preserves identity fields.
+
+    A ``value=None`` (possible with external/custom stores, skipped by the
+    migration cascade) is preserved end-to-end instead of being silently
+    coerced into the empty dict.
+    """
+    values = None if item.value is None else strip_value_tag(envelope.values)
     if isinstance(item, SearchItem):
         return SearchItem(
             namespace=item.namespace,

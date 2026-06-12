@@ -23,6 +23,7 @@ from pathlib import Path
 from .exceptions import (
     CyclicHistoryError,
     DuplicateRevisionError,
+    InvalidMigrationGraphError,
     MultipleHeadsError,
     RevisionNotAncestorError,
     RevisionNotFoundError,
@@ -36,20 +37,30 @@ class MigrationRegistry:
     def __init__(self, migrations: Iterable[BaseMigration]) -> None:
         self._by_rev: dict[str, BaseMigration] = {}
         for m in migrations:
+            if not isinstance(m.revision, str):
+                raise TypeError(
+                    f"Migration {m!r} has a non-string revision id: "
+                    f"{m.revision!r} (type {type(m.revision).__name__})"
+                )
             if not m.revision:
                 raise ValueError(f"Migration {m!r} has an empty revision id")
             if m.revision in self._by_rev:
                 raise DuplicateRevisionError(m.revision)
             self._by_rev[m.revision] = m
-        self._validate()
-        # The registry is immutable after construction, so derived DAG state can be
-        # built once / memoized: parent -> children edges, per-revision ancestor
-        # sets (filled lazily), and the head list.
+        # The registry is immutable after construction, so derived DAG state is
+        # built once and memoized: parent -> children edges, per-revision
+        # ancestor sets (filled lazily), and the head list. Built *before*
+        # _validate so the validator can use ``ancestors()`` for the
+        # redundant-merge-parents check. Unknown parents are skipped here —
+        # they are rejected by _validate with the proper RevisionNotFoundError
+        # rather than crashing on a KeyError.
         self._children: dict[str, list[str]] = {rev: [] for rev in self._by_rev}
         for m in self._by_rev.values():
             for parent in m.parents:
-                self._children[parent].append(m.revision)
+                if parent in self._children:
+                    self._children[parent].append(m.revision)
         self._ancestors: dict[str, frozenset[str]] = {}
+        self._validate()
         self._heads: list[str] = [rev for rev in self._by_rev if not self._children[rev]]
 
     # -- construction -------------------------------------------------------
@@ -254,6 +265,26 @@ class MigrationRegistry:
             for parent in parents:
                 if parent not in self._by_rev:
                     raise RevisionNotFoundError(parent)
+            # A merge's parents must be independent branches: if one parent is
+            # an ancestor of another, the edge is redundant (its effect is
+            # already covered by the descendant). The CLI's `langmigrate
+            # merge` enforces this invariant; the registry does too so
+            # hand-written merges (or merges that became redundant after a
+            # later revision was added) cannot bypass the check. Note: the
+            # resulting cascade is *the same* with or without the redundant
+            # edge — the topological sort and ancestor-set difference in
+            # ``upgrade_path`` / ``downgrade_path`` ignore the redundancy. This
+            # is a hygiene / clarity check, not a correctness fix.
+            if len(parents) > 1:
+                ancestor_sets = {p: self.ancestors(p) for p in parents}
+                for p1, p2 in ((a, b) for a in parents for b in parents if a != b):
+                    if p1 in ancestor_sets[p2]:
+                        raise InvalidMigrationGraphError(
+                            f"Migration {m.revision!r} merges a parent "
+                            f"({p1!r}) with its own descendant ({p2!r}): the "
+                            f"edge is redundant. Drop {p1!r} from "
+                            f"down_revision (the cascade is identical without it)."
+                        )
         self._check_acyclic()
 
     def _check_acyclic(self) -> None:
@@ -279,6 +310,13 @@ class MigrationRegistry:
                 path.append(rev)
                 stack.append((rev, True))
                 for parent in self._by_rev[rev].parents:
+                    if parent == rev:
+                        # A self-loop (``down_revision`` pointing to ``self``)
+                        # would otherwise emit a duplicated node in the path
+                        # (``[rev, rev]``); surface it as a clear single-node
+                        # self-loop instead so log parsers and humans can
+                        # recognise the pattern.
+                        raise CyclicHistoryError([f"{rev} (self-loop)"])
                     if color[parent] == GRAY:
                         raise CyclicHistoryError(path[path.index(parent) :] + [parent])
                     if color[parent] == WHITE:

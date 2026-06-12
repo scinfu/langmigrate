@@ -8,10 +8,12 @@ from .core.exceptions import (
     ChannelRemovalUnsupportedError,
     CyclicHistoryError,
     DuplicateRevisionError,
+    InvalidMigrationGraphError,
     IrreversibleMigrationError,
     LangMigrateError,
     MissingRequiredFieldError,
     MultipleHeadsError,
+    ReservedKeyCollisionError,
     RevisionNotAncestorError,
     RevisionNotFoundError,
     TopologyMismatchError,
@@ -20,7 +22,13 @@ from .core.exceptions import (
 from .core.migration import BaseMigration, FunctionMigration, migration
 from .core.registry import MigrationRegistry, new_revision_id
 from .core.topology import NodeRemap
-from .core.types import REVISION_METADATA_KEY, RevisionMeta, StateEnvelope
+from .core.types import (
+    REVISION_METADATA_KEY,
+    OnReservedKeyCollision,
+    OnUnknownRevision,
+    RevisionMeta,
+    StateEnvelope,
+)
 from .integrations.state import migrate_state_update
 from .runtime.batch import (
     BatchFailure,
@@ -33,7 +41,7 @@ from .runtime.batch import (
     run_store_batch_upgrade,
 )
 from .runtime.factory import setup_langmigrate, setup_langmigrate_store
-from .runtime.interceptor import MigrationInterceptor, OnUnknownRevision
+from .runtime.interceptor import MigrationInterceptor
 from .runtime.store import MigrationStore
 
 __version__ = "1.1.1"
@@ -49,6 +57,7 @@ __all__ = [
     "MigrationInterceptor",
     "MigrationStore",
     "OnUnknownRevision",
+    "OnReservedKeyCollision",
     "setup_langmigrate",
     "setup_langmigrate_store",
     "new_revision_id",
@@ -77,4 +86,6 @@ __all__ = [
     "IrreversibleMigrationError",
     "TopologyMismatchError",
     "ChannelRemovalUnsupportedError",
+    "ReservedKeyCollisionError",
+    "InvalidMigrationGraphError",
 ]

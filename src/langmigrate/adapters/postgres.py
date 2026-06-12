@@ -241,6 +241,12 @@ class PostgresStoreAdapter:
 
     The ``store`` table keys items by ``(prefix, key)`` where ``prefix`` is the
     dot-joined namespace tuple.
+
+    **Namespace roundtrip:** namespace elements are joined with ``.`` on write
+    and split on read. The split is unambiguous for anything written through
+    the LangGraph API, which rejects ``.`` inside a namespace label
+    (``InvalidNamespaceError``); only rows inserted into the ``store`` table
+    outside that API could produce an ambiguous prefix.
     """
 
     def __init__(self, conn: Any, store: PostgresStore) -> None:
@@ -292,6 +298,9 @@ class PostgresStoreAdapter:
                 )
                 rows = cur.fetchall()
             for row in rows:
+                # LangGraph stores namespaces as ``".".join(namespace)`` and
+                # forbids ``.`` inside a label, so this split recovers the
+                # original tuple for any row written through its API.
                 yield tuple(row["prefix"].split(".")), row["key"]
             if len(rows) < _PAGE_SIZE:
                 return

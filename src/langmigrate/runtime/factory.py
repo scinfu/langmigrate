@@ -22,6 +22,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from ..core.engine import HEAD, MigrationEngine
 from ..core.registry import MigrationRegistry
+from ..core.types import OnReservedKeyCollision
 from .interceptor import MigrationInterceptor, OnUnknownRevision
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -71,12 +72,18 @@ def setup_langmigrate_store(
     write_back: bool = True,
     target: str = HEAD,
     on_unknown_revision: OnUnknownRevision = "raise",
+    on_reserved_key_collision: OnReservedKeyCollision = "warn",
 ) -> MigrationStore:
     """Wrap ``store`` in a fully wired :class:`MigrationStore`.
 
     Accepts the same ``migrations`` forms as :func:`setup_langmigrate`. Store
     migrations normally live in their own directory (``store_migrations``) since
     item shapes evolve independently of checkpoint channel shapes.
+
+    ``on_reserved_key_collision`` is the policy applied when a put carries a
+    value under the reserved ``langmigrate_rev`` key (which would otherwise be
+    silently overwritten): ``"warn"`` (default) logs and proceeds,
+    ``"error"`` raises :class:`ReservedKeyCollisionError`.
     """
     from .store import MigrationStore
 
@@ -87,6 +94,7 @@ def setup_langmigrate_store(
         write_back=write_back,
         target=target,
         on_unknown_revision=on_unknown_revision,
+        on_reserved_key_collision=on_reserved_key_collision,
     )
 
 

@@ -141,3 +141,37 @@ class ChannelRemovalUnsupportedError(LangMigrateError):
             "Use MigrationInterceptor (the saver path) to purge them."
         )
         self.channels = list(channels)
+
+
+class ReservedKeyCollisionError(LangMigrateError):
+    """An application stored a value under the reserved ``langmigrate_rev`` key.
+
+    LangMigrate reserves that key for its own revision tag (in
+    ``checkpoint.metadata`` and inside store item values). A user field with the
+    same name would be silently overwritten on every write and stripped from
+    every read — total data loss. The ``on_reserved_key_collision`` policy on
+    ``MigrationStore`` / ``migrate_state_update`` surfaces this with ``"warn"``
+    or ``"error"`` instead of letting the overwrite happen quietly.
+    """
+
+    def __init__(self, key: str) -> None:
+        super().__init__(
+            f"Application stored a value under the reserved key {key!r}, which "
+            f"LangMigrate uses to carry the revision tag. Rename your field to "
+            f"avoid the collision, or set on_reserved_key_collision='warn' to "
+            f"opt in to the silent overwrite (with a warning)."
+        )
+        self.key = key
+
+
+class InvalidMigrationGraphError(LangMigrateError):
+    """The migration graph violates a structural invariant the registry enforces.
+
+    Raised for issues that are caught at registry construction time and that
+    the user should fix in their migration files. Examples: a merge revision
+    whose parents are in an ancestor/descendant relationship (one edge is
+    redundant — the cascade is identical without it).
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)

@@ -24,7 +24,14 @@ def read_revision(metadata: dict[str, Any] | None) -> str | None:
 
 
 def stamp_metadata(metadata: dict[str, Any] | None, revision: str) -> dict[str, Any]:
-    """Return a copy of ``metadata`` with the revision tag set to ``revision``."""
+    """Return a copy of ``metadata`` with the revision tag set to ``revision``.
+
+    :data:`REVISION_METADATA_KEY` is a **reserved** key in checkpoint metadata:
+    callers should not store application data under it. The wrapper layer
+    (``MigrationInterceptor``) overwrites any pre-existing value on every
+    ``put``. Unlike store values, checkpoint metadata is not application state,
+    so there is no collision-detection policy on this path.
+    """
     new_meta = dict(metadata or {})
     new_meta[REVISION_METADATA_KEY] = revision
     return new_meta
@@ -83,14 +90,32 @@ def read_value_revision(value: dict[str, Any] | None) -> str | None:
 
 
 def stamp_value(value: dict[str, Any], revision: str) -> dict[str, Any]:
-    """Return a copy of ``value`` with the revision tag set to ``revision``."""
+    """Return a copy of ``value`` with the revision tag set to ``revision``.
+
+    :data:`REVISION_METADATA_KEY` is a **reserved** key in store item values:
+    callers should not store application data under it. The wrapper layer
+    (``MigrationStore``) silently overwrites any pre-existing value on every
+    ``put`` — see the ``on_reserved_key_collision`` parameter for a warning /
+    raise policy that detects the collision.
+    """
     new_value = dict(value)
     new_value[REVISION_METADATA_KEY] = revision
     return new_value
 
 
-def strip_value_tag(value: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of ``value`` without the revision tag."""
+def strip_value_tag(value: dict[str, Any] | None) -> dict[str, Any]:
+    """Return a copy of ``value`` without the revision tag.
+
+    ``None`` is treated as "no payload" and yields ``{}``. LangGraph's own
+    stores never produce an ``Item`` with ``value=None`` (``PutOp(value=None)``
+    means *delete*, and ``put`` requires a dict), but external or custom
+    ``BaseStore`` implementations can — and the wrapper must serve such items
+    back rather than crash on ``dict(None)``. The migration paths skip
+    ``None``-valued items entirely, so the original ``None`` is preserved
+    end-to-end.
+    """
+    if value is None:
+        return {}
     new_value = dict(value)
     new_value.pop(REVISION_METADATA_KEY, None)
     return new_value

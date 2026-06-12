@@ -21,6 +21,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`MigrationStore` no longer crashes on a stored `value=None`.** LangGraph's
+  own stores never return an `Item` with `value=None` (`PutOp(value=None)`
+  means delete), but external or custom `BaseStore` implementations can — and
+  the wrapper used to crash on read because `strip_value_tag` blindly did
+  `dict(value)`. `strip_value_tag(None)` now returns `{}`,
+  `MigrationStore._migrate_item` skips the cascade for `None` values,
+  `rebuild_item` preserves the `None` in the returned `Item`, and
+  `run_store_batch_upgrade` / `run_store_batch_downgrade` skip `None`-valued
+  items instead of crashing.
+- **`MigrationRegistry` rejects non-string revision ids at load time.** A
+  typo like `revision = 42` was silently accepted (the `if not m.revision`
+  check passes for non-zero ints); the engine then compared `42` against
+  string-typed registered revisions and `read_revision` treated any int tag
+  as untagged — the symptom was a "checkpoint looks untagged" with no link
+  to the misconfigured migration. Both `MigrationRegistry.__init__` and
+  `FunctionMigration.__init__` now raise an explicit `TypeError` for
+  non-string revisions.
+- **Redundant-merge parents are rejected by the registry, not just the CLI.**
+  The CLI's `langmigrate merge` refused to create a merge whose parents were
+  in an ancestor/descendant relationship, but hand-written merges bypassed
+  the check. The registry now enforces the same invariant in `_validate`,
+  raising the new `InvalidMigrationGraphError` (re-exported from the package
+  root) with a message naming the redundant parent and its descendant. Note
+  this is a consistency/hygiene check, not a correctness fix: the resolved
+  cascade was already identical with or without the redundant edge (the
+  ancestor-set difference and topological sort ignore it). Registries that
+  previously loaded with such a merge will now fail at construction time —
+  drop the redundant parent from `down_revision` to fix.
+- **Reserved-key collision on `langmigrate_rev` is now surfaced.** Both
+  `MigrationStore` and `migrate_state_update` silently overwrote a user
+  value under the reserved `langmigrate_rev` key on every write, with no
+  signal to the application. A new `on_reserved_key_collision` policy
+  (`"warn"` | `"error"`, default `"warn"`) is exposed on `MigrationStore`
+  and `migrate_state_update`, propagated through
+  `setup_langmigrate_store` (the new `OnReservedKeyCollision` literal lives
+  in `langmigrate.core.types`; `ReservedKeyCollisionError` lives in
+  `langmigrate.core.exceptions` and is re-exported from the package root).
+- **Self-loop error message is no longer a duplicated node.** A migration
+  whose `down_revision` pointed to itself used to report
+  `Cycle detected in migration history involving: self, self`. The check
+  now detects the self-loop explicitly and emits
+  `Cycle detected in migration history involving: self (self-loop)`, which
+  is unambiguous to read and won't trip log parsers that match the path.
+- **Concurrency caveat of `MigrationInterceptor` write-back is documented.**
+  The `get_tuple` / `aget_tuple` write-back is a read-modify-write under
+  the wrapped saver's own locking, not an atomic compare-and-set: a
+  concurrent `put` on the same thread between the read and the write can
+  be silently overwritten. The module docstring and the method docstrings
+  now call out the single-writer-per-thread requirement and the
+  deployment patterns that need to disable write-back or serialize access.
+- **`PostgresStoreAdapter` namespace roundtrip is documented.** LangGraph
+  stores namespaces dot-joined and the adapter splits on `.` to recover the
+  tuple. The docstrings now spell out why that is safe: the LangGraph API
+  rejects `.` inside a namespace label (`InvalidNamespaceError`), so the
+  split is unambiguous for anything written through it — only rows inserted
+  into the `store` table outside the API could produce an ambiguous prefix.
+- **`stamp_value` / `stamp_metadata` docstrings declare the reserved key.**
+  The fact that `langmigrate_rev` is reserved is now stated in the helper
+  docstrings (it was previously only mentioned in the module-level notes),
+  pointing at the new `on_reserved_key_collision` policy for users who
+  need the wrapper to detect the collision.
 - **CI type check no longer fails on `SchemaMigrationMiddleware`'s dynamic
   `state_schema`.** Recent mypy releases attribute the "Invalid TypedDict()
   field name" error of the functional `TypedDict(...)` call (whose field name is

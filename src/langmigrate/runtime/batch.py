@@ -319,6 +319,12 @@ def run_store_batch_upgrade(
             item = store.get(namespace, key)
             if item is None:
                 continue
+            # ``value=None`` (possible with external/custom stores) is never
+            # tagged nor migrated — see MigrationStore._migrate_item. We still
+            # count it in ``total`` (it was enumerated as stale) but skip the
+            # upgrade.
+            if item.value is None:
+                continue
             envelope = envelope_from_item_parts(item.value, namespace=namespace, key=key)
             new_env = engine.upgrade_state(envelope, head)
             if new_env is envelope:
@@ -363,6 +369,8 @@ def run_store_batch_downgrade(
         try:
             item = store.get(namespace, key)
             if item is None:
+                continue
+            if item.value is None:
                 continue
             envelope = envelope_from_item_parts(item.value, namespace=namespace, key=key)
             if envelope.revision is None:

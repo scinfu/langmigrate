@@ -21,6 +21,14 @@ REVISION_METADATA_KEY = "langmigrate_rev"
 #: unmigrated, or serve it unmigrated silently.
 OnUnknownRevision = Literal["raise", "warn", "pass"]
 
+#: Policy when an application stores a value under the reserved
+#: :data:`REVISION_METADATA_KEY` (e.g. a field literally named
+#: ``langmigrate_rev``). LangMigrate reserves that key for its own tag — without
+#: a check, the wrapper would silently overwrite the user's data on every put
+#: (and strip it on every read). ``"warn"`` logs a warning and proceeds
+#: (overwriting the user value); ``"error"`` raises an explicit error.
+OnReservedKeyCollision = Literal["warn", "error"]
+
 # Sentinel distinguishing "no literal default given" from ``default=None``. Defined
 # here (rather than in ``operations``) so the fluent ``StateEnvelope`` helpers can
 # reference it without importing ``operations`` (which would be a circular import).

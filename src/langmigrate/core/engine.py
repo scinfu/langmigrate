@@ -53,9 +53,21 @@ class MigrationEngine:
         return state.revision != self.resolve_target(target)
 
     def upgrade_state(self, state: StateEnvelope, target: str = HEAD) -> StateEnvelope:
-        """Fold the upgrade cascade up to ``target``. No-op if already there."""
+        """Fold the upgrade cascade up to ``target``. No-op if already there.
+
+        If the state already sits **at or beyond** ``target`` (``target`` is an
+        ancestor of the state's revision), there is nothing to upgrade and the
+        state is returned unchanged rather than raising. This keeps a pinned
+        older ``target`` from crashing on a checkpoint already written ahead of
+        it — e.g. a mixed-version deploy or a partial rollback, where some
+        threads were lazily migrated past the target. Genuinely divergent
+        revisions (neither ancestor nor descendant of ``target``) are still
+        rejected by :meth:`MigrationRegistry.upgrade_path`.
+        """
         target_rev = self.resolve_target(target)
         if state.revision == target_rev:
+            return state
+        if state.revision is not None and target_rev in self.registry.ancestors(state.revision):
             return state
         current = state
         for rev in self.registry.upgrade_path(state.revision, target_rev):
@@ -78,6 +90,11 @@ class MigrationEngine:
             target = self.resolve_target(target)
         if state.revision == target:
             return state
+        # NOTE: unlike ``upgrade_state``, downgrading to a target that sits
+        # *above* the current revision is deliberately surfaced as an error
+        # (RevisionNotAncestorError, via ``downgrade_path``): the ``langmigrate
+        # downgrade`` command treats "downgrade to a higher revision" as a clear
+        # user mistake rather than silently doing nothing.
         path = self.registry.downgrade_path(state.revision, target)
         if not path:
             return state

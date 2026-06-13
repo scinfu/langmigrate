@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`upgrade_state` to a target the state is already past is now a no-op
+  instead of a crash.** `MigrationEngine.upgrade_state` to a pinned older
+  `target` used to raise `RevisionNotAncestorError` when the state was already
+  written *ahead* of that target (e.g. a mixed-version deploy or a partial
+  rollback where some threads were lazily migrated past it) — crashing the read
+  in `MigrationInterceptor` / `MigrationStore` / `migrate_state_update`. It now
+  returns the state unchanged when the target is an ancestor of the state's
+  revision. Genuinely divergent revisions (neither ancestor nor descendant of
+  the target) still raise. Downgrade is intentionally left strict:
+  `downgrade_state` (and the `langmigrate downgrade` CLI) still surface
+  "downgrade to a higher revision" as a clear `RevisionNotAncestorError` rather
+  than silently doing nothing. The low-level `MigrationRegistry.upgrade_path` /
+  `downgrade_path` are unchanged.
 - **`revision --autogenerate` no longer emits an unparseable migration for a
   non-builtin type change.** When a field's type changed to anything outside
   `{int, str, float, bool}` (e.g. `list[int]`, `dict[str, int]`, a custom

@@ -240,3 +240,48 @@ def test_upgrade_at_merge_head_is_noop():
         values={"base_field": True, "a_field": True, "b_field": True}, revision="merge"
     )
     assert eng.upgrade_state(state, "head") is state
+
+
+# -- upgrade to a target the state is already past is a no-op, not a crash ----
+#
+# Regression: ``upgrade_state`` to a pinned older ``target`` used to raise
+# RevisionNotAncestorError on a checkpoint already written *ahead* of it (e.g. a
+# mixed-version deploy or a partial rollback where some threads were lazily
+# migrated past the target). It now no-ops. (Downgrade is intentionally NOT
+# made lenient — ``downgrade`` to a higher revision stays a clear user error;
+# see ``downgrade_state`` and ``test_cli_db``.)
+
+
+def test_upgrade_to_older_target_when_state_is_ahead_is_noop():
+    e = engine()  # linear v1 -> v2 -> v3
+    state = StateEnvelope(values={"context": {}, "messages": ["hi"], "count": 5}, revision="v3")
+    # Pinning the target below the state's revision must not crash; the state is
+    # already past v1, so there is nothing to upgrade.
+    assert e.upgrade_state(state, "v1") is state
+
+
+def test_upgrade_to_intermediate_older_target_when_state_is_ahead_is_noop():
+    e = engine()  # linear v1 -> v2 -> v3
+    state = StateEnvelope(values={"context": {}, "messages": ["hi"], "count": 5}, revision="v3")
+    assert e.upgrade_state(state, "v2") is state
+
+
+def test_upgrade_between_divergent_branches_still_raises():
+    from langmigrate.core.exceptions import RevisionNotAncestorError
+
+    eng = diamond_engine()
+    # State on branch 'a', target the sibling branch 'b': genuinely unreachable.
+    state = StateEnvelope(values={"base_field": True, "a_field": True}, revision="a")
+    with pytest.raises(RevisionNotAncestorError):
+        eng.upgrade_state(state, "b")
+
+
+def test_downgrade_to_higher_target_still_raises():
+    from langmigrate.core.exceptions import RevisionNotAncestorError
+
+    e = engine()  # linear v1 -> v2 -> v3
+    # State at v1, asked to "downgrade" to v2 (above it): deliberately a clear
+    # error, NOT a silent no-op (mirrors the `langmigrate downgrade` CLI UX).
+    state = StateEnvelope(values={"context": {}}, revision="v1")
+    with pytest.raises(RevisionNotAncestorError):
+        e.downgrade_state(state, "v2")

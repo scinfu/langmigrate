@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] — 2026-06-13
+
+### Fixed
+
+- **Fluent `state.require_field(...)` no longer reports the wrong revision.**
+  The fluent helper on `StateEnvelope` passed `revision=self.revision` to
+  `MissingRequiredFieldError` — but on an envelope `self.revision` is the
+  state's *current/source* tag (the revision being migrated *from*), not the
+  migration that requires the field. During the cascade the envelope is
+  stamped with the new revision only *after* `upgrade()` returns, so a field
+  required by `v2` was reported as missing "(revision v1)", pointing an
+  operator at the wrong migration. The fluent helper has no handle on the
+  migration being applied, so it now passes `revision=None` (omitting the
+  misleading detail) while `BaseMigration.require_field(state, ...)` continues
+  to supply the accurate migration revision. Behaviour on the data is
+  unchanged; only the diagnostic was wrong.
+
 ## [1.2.0] — 2026-06-12
 
 ### Added

@@ -533,6 +533,66 @@ def test_self_loop_error_message_is_clear():
     assert excinfo.value.revisions == ["self (self-loop)"]
 
 
+# Bug #8: the fluent ``state.require_field(...)`` reported the *envelope's own*
+# (source) revision in MissingRequiredFieldError instead of the migration that
+# requires the field, diverging from ``self.require_field(state, ...)`` and
+# pointing an operator at the wrong revision. The fluent helper has no handle
+# on the migration being applied, so it now passes ``revision=None`` (no
+# misleading value) while the method style keeps the accurate revision.
+
+
+def test_require_field_fluent_does_not_report_source_revision():
+    from langmigrate.core.exceptions import MissingRequiredFieldError
+
+    class V1(BaseMigration):
+        revision = "v1"
+        down_revision = None
+
+        def upgrade(self, state):
+            return state
+
+        def downgrade(self, state):
+            return state
+
+    # Fluent style: the migration that requires the field is v2.
+    class V2Fluent(BaseMigration):
+        revision = "v2"
+        down_revision = "v1"
+
+        def upgrade(self, state):
+            return state.require_field("must")
+
+        def downgrade(self, state):
+            return state
+
+    # Method style: same logical failure, accurate revision.
+    class V2Method(BaseMigration):
+        revision = "v2"
+        down_revision = "v1"
+
+        def upgrade(self, state):
+            return self.require_field(state, "must")
+
+        def downgrade(self, state):
+            return state
+
+    state = StateEnvelope(values={"other": 1}, revision="v1")
+
+    eng_fluent = MigrationEngine(MigrationRegistry.from_migrations([V1(), V2Fluent()]))
+    with pytest.raises(MissingRequiredFieldError) as fluent_exc:
+        eng_fluent.upgrade_state(state, "v2")
+    # The bug was reporting the *source* revision ("v1"); the fluent helper must
+    # not claim a revision it cannot know.
+    assert fluent_exc.value.revision is None
+    assert "v1" not in str(fluent_exc.value)
+
+    eng_method = MigrationEngine(MigrationRegistry.from_migrations([V1(), V2Method()]))
+    with pytest.raises(MissingRequiredFieldError) as method_exc:
+        eng_method.upgrade_state(state, "v2")
+    # The method style still names the migration that requires the field.
+    assert method_exc.value.revision == "v2"
+
+
 # -- shared helpers for the regression tests --------------------------------
 
 

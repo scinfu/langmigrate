@@ -124,6 +124,11 @@ class StateEnvelope(BaseModel):
         """Unsafe: assert ``name`` exists, else inject a fallback or block."""
         from . import operations as ops
 
-        return ops.require_field(
-            self, name, fallback=fallback, factory=factory, revision=self.revision
-        )
+        # ``self.revision`` here is the envelope's *current* (source) tag — the
+        # revision the state is migrating *from*, not the migration that requires
+        # the field. Reporting it in MissingRequiredFieldError would point an
+        # operator at the wrong revision. The fluent helper has no handle on the
+        # migration being applied, so it passes ``revision=None`` rather than a
+        # misleading value; ``BaseMigration.require_field`` supplies the accurate
+        # migration revision.
+        return ops.require_field(self, name, fallback=fallback, factory=factory, revision=None)

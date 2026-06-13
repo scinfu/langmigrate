@@ -128,8 +128,15 @@ def test_literal_rendering_with_quotes():
 def test_coercion_expr_placeholder():
     from langmigrate.core.schema import _coercion_expr
 
-    expr = _coercion_expr("list[int]")
-    assert "TODO: implement manual coercion to list[int]" in expr
+    expr, todo = _coercion_expr("list[int]")
+    # The expression itself must be a valid, comment-free callable; the TODO is
+    # returned separately so it can be emitted on its own line.
+    assert expr == "lambda v: v"
+    assert "#" not in expr
+    assert todo is not None and "TODO: implement manual coercion to list[int]" in todo
+
+    builtin_expr, builtin_todo = _coercion_expr("int")
+    assert builtin_expr == "int" and builtin_todo is None
 
 
 def test_discovery_cross_file_imports(tmp_path):
@@ -591,6 +598,54 @@ def test_require_field_fluent_does_not_report_source_revision():
         eng_method.upgrade_state(state, "v2")
     # The method style still names the migration that requires the field.
     assert method_exc.value.revision == "v2"
+
+
+# Bug #9: autogenerate produced an *unparseable* migration when a field's type
+# changed to a non-builtin (e.g. ``list[int]``). The TODO placeholder was
+# inlined as ``lambda v: v  # TODO ...`` right inside the ``coerce_field(...)``
+# call, so the ``#`` commented out the closing ``)`` —
+# ``SyntaxError: '(' was never closed`` — which broke loading the *whole*
+# migrations directory. The TODO now goes on its own comment line and the
+# expression stays a clean, valid ``lambda v: v``.
+
+
+def test_autogenerate_non_builtin_coercion_renders_valid_python():
+    import ast
+
+    from langmigrate.core.schema import SchemaDiff, render_bodies
+
+    diff = SchemaDiff(changed={"tags": ("str", "list[int]")})
+    up, down = render_bodies(diff)
+
+    for body in (up, down):
+        # The coerce statement must parse on its own and must not have the TODO
+        # swallowing the closing paren.
+        rendered = "\n".join(body)
+        assert "coerce_field" in rendered
+        coerce_lines = [ln for ln in body if ln.startswith("state = self.coerce_field")]
+        assert coerce_lines, body
+        for line in coerce_lines:
+            ast.parse(line)  # raises SyntaxError if the paren was swallowed
+            assert line.rstrip().endswith(")")
+
+
+def test_autogenerate_changed_type_migration_is_loadable(tmp_path):
+    # End-to-end: a generated revision changing a field to a non-builtin type
+    # must produce a file the registry can actually import.
+    from langmigrate.cli.main import _create_revision
+
+    schema_mod = tmp_path / "st.py"
+    schema_mod.write_text(
+        "from typing_extensions import TypedDict\nclass S(TypedDict):\n    tags: list[int]\n"
+    )
+    mig_dir = tmp_path / "migrations"
+    sys.path.insert(0, str(tmp_path))
+    try:
+        _create_revision(mig_dir, "change tags", autogenerate=True, schema="st:S")
+        reg = MigrationRegistry.from_path(mig_dir)  # must not raise SyntaxError
+        assert len(reg) == 1
+    finally:
+        sys.path.remove(str(tmp_path))
 
 
 # -- shared helpers for the regression tests --------------------------------

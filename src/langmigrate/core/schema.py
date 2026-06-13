@@ -138,13 +138,19 @@ def diff_schema(old: dict[str, str], new: dict[str, str]) -> SchemaDiff:
     return diff
 
 
-def _coercion_expr(type_repr: str) -> str:
-    """Callable expression to coerce to ``type_repr``, or a TODO placeholder."""
+def _coercion_expr(type_repr: str) -> tuple[str, str | None]:
+    """``(callable_expr, todo_comment)`` to coerce to ``type_repr``.
+
+    For a builtin target the expression is the type itself (e.g. ``int``) and
+    there is no TODO. For anything else the expression is a conservative
+    identity ``lambda v: v`` and the TODO is returned **separately** so the
+    caller can emit it on its own line: inlining ``# TODO ...`` after the lambda
+    would comment out the rest of the generated statement — including the
+    closing ``)`` of ``coerce_field(...)`` — producing an unparseable file.
+    """
     if type_repr in _BUILTIN_COERCIONS:
-        return type_repr
-    # For common generic types without nested complex types, we could do more,
-    # but the conservative 'lambda' is safer for autogenerate.
-    return f"lambda v: v  # TODO: implement manual coercion to {type_repr}"
+        return type_repr, None
+    return "lambda v: v", f"# TODO: implement manual coercion to {type_repr}"
 
 
 def render_bodies(diff: SchemaDiff) -> tuple[list[str], list[str]]:
@@ -163,8 +169,14 @@ def render_bodies(diff: SchemaDiff) -> tuple[list[str], list[str]]:
         up.append(f'state = self.drop_field(state, "{name}")')
         down.append(f'state = self.add_field(state, "{name}", default=None)  # {type_repr}')
     for name, (old_type, new_type) in diff.changed.items():
-        up.append(f'state = self.coerce_field(state, "{name}", {_coercion_expr(new_type)})')
-        down.append(f'state = self.coerce_field(state, "{name}", {_coercion_expr(old_type)})')
+        up_expr, up_todo = _coercion_expr(new_type)
+        if up_todo:
+            up.append(up_todo)
+        up.append(f'state = self.coerce_field(state, "{name}", {up_expr})')
+        down_expr, down_todo = _coercion_expr(old_type)
+        if down_todo:
+            down.append(down_todo)
+        down.append(f'state = self.coerce_field(state, "{name}", {down_expr})')
 
     if diff.removed and diff.added:
         note = (

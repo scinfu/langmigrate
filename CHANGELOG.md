@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`revision --autogenerate` no longer emits an unparseable migration for a
+  non-builtin type change.** When a field's type changed to anything outside
+  `{int, str, float, bool}` (e.g. `list[int]`, `dict[str, int]`, a custom
+  class), the generated `coerce_field` call inlined the TODO placeholder as
+  `lambda v: v  # TODO ...` *inside* the call — so the `#` commented out the
+  closing `)` and the file failed to import with
+  `SyntaxError: '(' was never closed`. Because discovery imports every file in
+  the directory, a single such revision broke the *entire* migrations
+  directory (`history`, `check`, `upgrade`, `MigrationRegistry.from_path` all
+  failed). The TODO is now emitted on its own comment line above the statement
+  and the coercion expression stays a clean, valid `lambda v: v`.
+  `_coercion_expr` now returns `(expr, todo_comment)` instead of a single
+  string.
 - **Fluent `state.require_field(...)` no longer reports the wrong revision.**
   The fluent helper on `StateEnvelope` passed `revision=self.revision` to
   `MissingRequiredFieldError` — but on an envelope `self.revision` is the

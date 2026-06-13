@@ -102,6 +102,15 @@ def _registry_from_path(path: Path) -> MigrationRegistry:
         raise typer.Exit(1) from exc
 
 
+def _require_revision(registry: MigrationRegistry, revision: str) -> None:
+    """Validate ``revision`` exists, rendering the error nicely instead of a traceback."""
+    try:
+        registry.get(revision)
+    except LangMigrateError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(1) from exc
+
+
 def _build_adapter(cfg: LangMigrateConfig):
     if cfg.backend not in ("postgres", "redis"):
         typer.secho(
@@ -557,7 +566,7 @@ def stamp(
     """
     cfg = LangMigrateConfig.load()
     registry = _load_registry(cfg)
-    registry.get(revision)  # validate it exists
+    _require_revision(registry, revision)  # validate it exists
 
     typer.secho(
         f"WARNING: stamp tags every checkpoint as {revision!r} WITHOUT migrating data. "
@@ -694,7 +703,7 @@ def store_stamp(
     """Set the revision tag on all store items WITHOUT running migrations."""
     cfg = LangMigrateConfig.load()
     registry = _load_store_registry(cfg)
-    registry.get(revision)  # validate it exists
+    _require_revision(registry, revision)  # validate it exists
 
     typer.secho(
         f"WARNING: stamp tags every store item as {revision!r} WITHOUT migrating data. "

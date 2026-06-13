@@ -186,7 +186,11 @@ def test_stamp_unknown_revision_rejected(tmp_path, monkeypatch):
     _patch_adapter(monkeypatch, adapter)
     with chdir(tmp_path):
         result = runner.invoke(app, ["stamp", "ghost", "--yes"])
-    assert result.exit_code != 0
+    assert result.exit_code == 1
+    # Rendered as a clean message, not a raw traceback (consistent with the rest
+    # of the CLI). Typer would have set ``result.exception`` if it had escaped.
+    assert "not found" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
 def test_current_db_shows_revision_distribution(tmp_path, monkeypatch):
@@ -365,6 +369,17 @@ def test_store_upgrade_command_migrates(tmp_path, monkeypatch):
     item = adapter.store.get(("memories", "u1"), "m1")
     assert item.value[REVISION_METADATA_KEY] == "s1"
     assert item.value["kind"] == "memory"
+
+
+def test_store_stamp_unknown_revision_rejected(tmp_path, monkeypatch):
+    adapter = _store_project(tmp_path)
+    monkeypatch.setattr(cli_main, "_build_store_adapter", lambda cfg: adapter)
+    with chdir(tmp_path):
+        result = runner.invoke(app, ["store", "stamp", "ghost", "--yes"])
+    assert result.exit_code == 1
+    # Clean message, not a raw traceback (consistent with the rest of the CLI).
+    assert "not found" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
 def test_store_history_and_check(tmp_path):

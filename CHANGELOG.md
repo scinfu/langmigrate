@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] — 2026-06-14
+
+### Fixed
+
+- **`langmigrate stamp` / `langmigrate store stamp` now render an unknown
+  revision as a clean error instead of a raw traceback.** The revision-exists
+  validation called `registry.get(revision)` directly, so passing a revision id
+  not in the registry let `RevisionNotFoundError` escape and Typer dumped a full
+  traceback (still exit code 1, but inconsistent with every other CLI command,
+  which renders `LangMigrateError` as a single red line). Both `stamp` commands
+  now go through a shared `_require_revision` helper that prints the message and
+  exits 1 cleanly. No behavioural change beyond the error presentation.
+
 ## [1.2.1] — 2026-06-13
 
 ### Fixed

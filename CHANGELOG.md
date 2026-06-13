@@ -48,6 +48,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to supply the accurate migration revision. Behaviour on the data is
   unchanged; only the diagnostic was wrong.
 
+### Internal
+
+- **Docker-free unit coverage for the adapter pure logic** (`tests/unit/
+  test_adapters_logic.py`). The Postgres/Redis keyset SQL + parameter
+  construction, store namespace round-trip, `<untagged>` aggregation, and the
+  Redis metadata parsing were previously exercised only by the integration
+  suite (which needs Docker). They now have a fast regression net using fake
+  DB clients, so a change to the query shape is caught without a database.
+
 ## [1.2.0] — 2026-06-12
 
 ### Added

@@ -40,9 +40,17 @@ class NodeRemap:
 
     def resolve(self, node: str, *, known_nodes: Iterable[str] | None = None) -> str:
         """Return the node a stuck thread should resume on, or raise if unmappable."""
-        if node in self.renames:
-            return self.renames[node]
         known = set(known_nodes) if known_nodes is not None else None
+        if node in self.renames:
+            target = self.renames[node]
+            # A rename must point at a node that actually exists in the current
+            # graph; redirecting to a node that is itself gone would just move the
+            # deadlock. When ``known_nodes`` is supplied, validate the target so a
+            # stale rename is surfaced as a structured TopologyMismatchError rather
+            # than silently re-stranding the thread.
+            if known is not None and target not in known:
+                raise TopologyMismatchError(target, known_nodes=sorted(known))
+            return target
         is_missing = node in self.removed or (known is not None and node not in known)
         if is_missing:
             if self.fallback is not None:

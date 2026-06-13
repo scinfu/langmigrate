@@ -14,6 +14,7 @@ from langmigrate.core.exceptions import (
     CyclicHistoryError,
     InvalidMigrationGraphError,
     ReservedKeyCollisionError,
+    TopologyMismatchError,
 )
 from langmigrate.core.migration import BaseMigration, FunctionMigration
 from langmigrate.core.registry import MigrationRegistry
@@ -646,6 +647,142 @@ def test_autogenerate_changed_type_migration_is_loadable(tmp_path):
         assert len(reg) == 1
     finally:
         sys.path.remove(str(tmp_path))
+
+
+# Bug #10: the batch runners (checkpoint + store) ignored the
+# ``on_unknown_revision`` tolerance that the lazy paths honor. A single
+# checkpoint/item tagged with a revision absent from the registry (the
+# documented code-rollback-after-lazy-migration case) raised
+# RevisionNotFoundError and aborted the WHOLE run — even though such state is
+# simply ahead of the rolled-back code and should be left alone. The runners now
+# accept ``on_unknown_revision`` ("raise" default keeps the old behavior;
+# "warn"/"pass" skip the item, counting it in ``total`` but not ``migrated``).
+
+
+def _stale_checkpoint_saver(stored_rev: str):
+    from langgraph.checkpoint.base import empty_checkpoint
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    saver = InMemorySaver()
+    cfg = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    cp = empty_checkpoint()
+    cp["channel_values"] = {"foo": 1}
+    cp["channel_versions"] = {"foo": "1"}
+    saved = saver.put(
+        cfg, cp, {"source": "input", "step": 0, REVISION_METADATA_KEY: stored_rev}, {"foo": "1"}
+    )
+
+    class _Adapter:
+        def __init__(self) -> None:
+            self.saver = saver
+
+        def iter_stale_configs(self, head):
+            yield {"configurable": dict(saved["configurable"])}
+
+        def iter_all_configs(self):
+            yield from self.iter_stale_configs("")
+
+        def close(self) -> None:
+            pass
+
+    return _Adapter()
+
+
+def test_batch_upgrade_raises_on_unknown_revision_by_default():
+    from langmigrate.core.exceptions import RevisionNotFoundError
+    from langmigrate.runtime.batch import run_batch_upgrade
+
+    eng = MigrationEngine(MigrationRegistry.from_migrations([_SingleRevisionMigration()]))
+    with pytest.raises(RevisionNotFoundError):
+        run_batch_upgrade(_stale_checkpoint_saver("v99"), eng)
+
+
+@pytest.mark.parametrize("policy", ["warn", "pass"])
+def test_batch_upgrade_skips_unknown_revision_under_policy(policy):
+    from langmigrate.runtime.batch import run_batch_upgrade
+
+    eng = MigrationEngine(MigrationRegistry.from_migrations([_SingleRevisionMigration()]))
+    result = run_batch_upgrade(_stale_checkpoint_saver("v99"), eng, on_unknown_revision=policy)
+    # Enumerated (counted in total) but skipped, not migrated, and not a failure.
+    assert result.total == 1
+    assert result.migrated == 0
+    assert result.ok
+
+
+def test_batch_upgrade_warn_policy_does_not_swallow_other_revision_errors():
+    # The tolerance applies ONLY to the checkpoint's OWN tag. A migration that
+    # references a *different* unknown revision (a broken registry pointer / bad
+    # target) must still surface, even under "warn"/"pass".
+    from langmigrate.core.exceptions import RevisionNotFoundError
+    from langmigrate.runtime.batch import run_batch_upgrade
+
+    eng = MigrationEngine(MigrationRegistry.from_migrations([_SingleRevisionMigration()]))
+    # Target a revision that does not exist: resolve_target raises up front.
+    with pytest.raises(RevisionNotFoundError):
+        run_batch_upgrade(_stale_checkpoint_saver("v1"), eng, target="nope")
+
+
+def test_store_batch_upgrade_skips_unknown_revision_under_policy():
+    from langmigrate.adapters.base import StoreAdapter
+    from langmigrate.runtime.batch import run_store_batch_upgrade
+
+    raw = InMemoryStore()
+    # Stamp an item with an unknown revision directly inside its value.
+    raw.put(("ns",), "k", {"msgs": ["hi"], REVISION_METADATA_KEY: "v99"})
+
+    class _AdHocAdapter(StoreAdapter):
+        def __init__(self, store, items):
+            self._store = store
+            self._items = items
+
+        @property
+        def store(self):
+            return self._store
+
+        def iter_stale_items(self, head):
+            yield from self._items
+
+        def iter_all_items(self):
+            yield from self._items
+
+        def close(self):
+            pass
+
+    eng = MigrationEngine(MigrationRegistry.from_migrations([_RenameMsgsMigration()]))
+    adapter = _AdHocAdapter(raw, [(("ns",), "k")])
+    result = run_store_batch_upgrade(adapter, eng, on_unknown_revision="warn")
+    assert result.total == 1 and result.migrated == 0 and result.ok
+    # The unknown-tagged value was left untouched.
+    assert raw.get(("ns",), "k").value[REVISION_METADATA_KEY] == "v99"
+
+
+# Bug #11: NodeRemap redirected a renamed node to its target without checking the
+# target exists in the current graph. A stale rename (pointing at a node that was
+# itself removed) silently re-stranded the thread instead of surfacing a
+# TopologyMismatchError. With known_nodes supplied, the target is now validated.
+
+
+def test_noderemap_rename_to_missing_target_raises_when_known_nodes_given():
+    from langmigrate.core.topology import NodeRemap
+
+    remap = NodeRemap(renames={"old": "gone"})
+    with pytest.raises(TopologyMismatchError) as ei:
+        remap.resolve("old", known_nodes={"a", "b"})
+    assert ei.value.node == "gone"
+
+
+def test_noderemap_rename_to_valid_target_is_unaffected():
+    from langmigrate.core.topology import NodeRemap
+
+    remap = NodeRemap(renames={"old": "a"})
+    assert remap.resolve("old", known_nodes={"a", "b"}) == "a"
+    # Without known_nodes, the target is not validated (unchanged behavior).
+    assert NodeRemap(renames={"old": "gone"}).resolve("old") == "gone"
+
+
+# Bug #12 (SchemaMigrationMiddleware never forwarded on_reserved_key_collision)
+# is covered in tests/unit/test_integrations_langchain.py, which stubs the
+# optional ``langchain`` AgentMiddleware base.
 
 
 # -- shared helpers for the regression tests --------------------------------

@@ -473,6 +473,25 @@ def check() -> None:
     _emit_check(_load_registry(cfg))
 
 
+def _parse_unknown_policy(value: str) -> str:
+    """Validate the ``--on-unknown-revision`` value, erroring nicely otherwise."""
+    allowed = ("raise", "warn", "pass")
+    if value not in allowed:
+        typer.secho(
+            f"Invalid --on-unknown-revision {value!r} (expected one of {', '.join(allowed)}).",
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(1)
+    return value
+
+
+_UNKNOWN_REV_HELP = (
+    "Policy for a checkpoint/item tagged with a revision not in the registry "
+    "(typically a code rollback after a lazy migration): 'raise' (default) fails, "
+    "'warn' logs and skips it, 'pass' skips it silently."
+)
+
+
 def _report_batch_result(result) -> None:
     """Render a BatchResult, listing failures and exiting non-zero if any."""
     color = typer.colors.GREEN if result.ok else typer.colors.YELLOW
@@ -499,11 +518,15 @@ def upgrade(
     continue_on_error: bool = typer.Option(
         False, "--continue-on-error", help="Record failing checkpoints instead of aborting."
     ),
+    on_unknown_revision: str = typer.Option(
+        "raise", "--on-unknown-revision", help=_UNKNOWN_REV_HELP
+    ),
 ) -> None:
     """Proactively migrate every stale checkpoint in the database up to TARGET."""
     from ..runtime.batch import run_batch_upgrade
 
     cfg = LangMigrateConfig.load()
+    policy = _parse_unknown_policy(on_unknown_revision)
     engine = MigrationEngine(_load_registry(cfg))
     adapter = _build_adapter(cfg)
     try:
@@ -514,6 +537,7 @@ def upgrade(
             target=target,
             dry_run=online_dry_run,
             continue_on_error=continue_on_error,
+            on_unknown_revision=policy,  # type: ignore[arg-type]
         )
     except LangMigrateError as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
@@ -532,18 +556,27 @@ def downgrade(
     continue_on_error: bool = typer.Option(
         False, "--continue-on-error", help="Record failing checkpoints instead of aborting."
     ),
+    on_unknown_revision: str = typer.Option(
+        "raise", "--on-unknown-revision", help=_UNKNOWN_REV_HELP
+    ),
 ) -> None:
     """Downgrade every checkpoint in the database down to TARGET."""
     from ..runtime.batch import run_batch_downgrade
 
     cfg = LangMigrateConfig.load()
+    policy = _parse_unknown_policy(on_unknown_revision)
     engine = MigrationEngine(_load_registry(cfg))
     resolved: str | None = None if target == "base" else target
     adapter = _build_adapter(cfg)
     try:
         adapter.setup()
         result = run_batch_downgrade(
-            adapter, engine, resolved, dry_run=dry_run, continue_on_error=continue_on_error
+            adapter,
+            engine,
+            resolved,
+            dry_run=dry_run,
+            continue_on_error=continue_on_error,
+            on_unknown_revision=policy,  # type: ignore[arg-type]
         )
     except LangMigrateError as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
@@ -641,11 +674,15 @@ def store_upgrade(
     continue_on_error: bool = typer.Option(
         False, "--continue-on-error", help="Record failing items instead of aborting."
     ),
+    on_unknown_revision: str = typer.Option(
+        "raise", "--on-unknown-revision", help=_UNKNOWN_REV_HELP
+    ),
 ) -> None:
     """Proactively migrate every stale store item in the database up to TARGET."""
     from ..runtime.batch import run_store_batch_upgrade
 
     cfg = LangMigrateConfig.load()
+    policy = _parse_unknown_policy(on_unknown_revision)
     engine = MigrationEngine(_load_store_registry(cfg))
     adapter = _build_store_adapter(cfg)
     try:
@@ -656,6 +693,7 @@ def store_upgrade(
             target=target,
             dry_run=online_dry_run,
             continue_on_error=continue_on_error,
+            on_unknown_revision=policy,  # type: ignore[arg-type]
         )
     except LangMigrateError as exc:
         typer.secho(str(exc), fg=typer.colors.RED)
@@ -674,18 +712,27 @@ def store_downgrade(
     continue_on_error: bool = typer.Option(
         False, "--continue-on-error", help="Record failing items instead of aborting."
     ),
+    on_unknown_revision: str = typer.Option(
+        "raise", "--on-unknown-revision", help=_UNKNOWN_REV_HELP
+    ),
 ) -> None:
     """Downgrade every store item in the database down to TARGET."""
     from ..runtime.batch import run_store_batch_downgrade
 
     cfg = LangMigrateConfig.load()
+    policy = _parse_unknown_policy(on_unknown_revision)
     engine = MigrationEngine(_load_store_registry(cfg))
     resolved: str | None = None if target == "base" else target
     adapter = _build_store_adapter(cfg)
     try:
         adapter.setup()
         result = run_store_batch_downgrade(
-            adapter, engine, resolved, dry_run=dry_run, continue_on_error=continue_on_error
+            adapter,
+            engine,
+            resolved,
+            dry_run=dry_run,
+            continue_on_error=continue_on_error,
+            on_unknown_revision=policy,  # type: ignore[arg-type]
         )
     except LangMigrateError as exc:
         typer.secho(str(exc), fg=typer.colors.RED)

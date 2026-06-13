@@ -145,6 +145,23 @@ def test_middleware_unknown_revision_policy_forwarded(stub_langchain):
     assert tolerant.before_agent(dict(rolled_back)) is None
 
 
+def test_middleware_forwards_reserved_key_collision_policy(stub_langchain):
+    # Regression: the middleware never forwarded on_reserved_key_collision to
+    # migrate_state_update, so it was stuck on the "warn" default and "error"
+    # could not be selected. A non-string value under the reserved rev_key with
+    # the "error" policy must now raise.
+    from langmigrate.core.exceptions import ReservedKeyCollisionError
+
+    mod = importlib.import_module("langmigrate.integrations.langchain")
+    mw = mod.SchemaMigrationMiddleware(_engine(), on_reserved_key_collision="error")
+    with pytest.raises(ReservedKeyCollisionError):
+        mw.before_model({"messages": ["hi"], "langmigrate_rev": 42})
+
+    # The default policy ("warn") still proceeds (no raise).
+    tolerant = mod.SchemaMigrationMiddleware(_engine())
+    assert tolerant.before_model({"messages": ["hi"], "langmigrate_rev": 42}) is not None
+
+
 def test_custom_rev_key_declares_matching_channel(stub_langchain):
     # The contributed state channel must follow rev_key, or LangGraph would
     # reject the update as targeting an undeclared channel.

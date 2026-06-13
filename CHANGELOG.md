@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The batch runners now honour an `on_unknown_revision` policy, so a single
+  checkpoint/item tagged with a revision absent from the registry no longer
+  aborts the whole run.** The lazy paths (`MigrationInterceptor`,
+  `MigrationStore`, `migrate_state_update`) already tolerate a state whose own
+  tag the registry does not know — the documented "code rollback after a lazy
+  migration" case — but `run_batch_upgrade` / `run_batch_downgrade` (plus their
+  async and store twins) had no such option: `upgrade_state` raised
+  `RevisionNotFoundError` and aborted the entire run (or, with
+  `--continue-on-error`, recorded every such item as a *failure* rather than a
+  skip). All six runners now accept `on_unknown_revision` (`"raise"` default
+  keeps the old behaviour; `"warn"`/`"pass"` skip the item — counted in `total`
+  but not `migrated`). The tolerance applies only to the item's *own* tag; a bad
+  target or a broken registry pointer still raises. Exposed on the CLI as
+  `--on-unknown-revision` for `upgrade`, `downgrade`, `store upgrade` and
+  `store downgrade`.
+- **`NodeRemap` now validates a rename's target against `known_nodes`.** A
+  rename pointing at a node that is itself gone (a stale remap) silently
+  redirected the thread onto a non-existent node — just moving the deadlock.
+  When `known_nodes` is supplied, an unknown rename target now raises a
+  structured `TopologyMismatchError`. Behaviour without `known_nodes` is
+  unchanged.
+- **`SchemaMigrationMiddleware` now forwards `on_reserved_key_collision`.** The
+  middleware never passed the policy through to `migrate_state_update`, so it
+  was stuck on the `"warn"` default and `"error"` could not be selected on that
+  path.
+
 ## [1.2.2] — 2026-06-14
 
 ### Fixed

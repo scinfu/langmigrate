@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Redis adapter now reads the revision tag from `bytes` metadata.** A
+  Redis client not configured with `decode_responses=True` returns the
+  serialized `$.metadata` field as raw `bytes`; `RedisAdapter._revision_from_metadata`
+  only handled `str`/`dict`, so every checkpoint was misread as *untagged* and
+  therefore reported as stale — making `current --db`, `count_stale` and the
+  stale-only enumeration churn over already-current checkpoints. It now parses
+  `bytes`/`bytearray` as well (and tolerates malformed / non-UTF-8 payloads as
+  untagged rather than crashing the sweep). Data was never corrupted — the batch
+  runner re-derives the real tag via the saver and no-ops at head — but the
+  enumeration was needlessly wasteful and the reported distribution wrong.
+- **`MigrationStore` no longer requires the wrapped store to declare the TTL
+  surface.** `__init__` read `store.supports_ttl` / `store.ttl_config`
+  unconditionally, crashing a duck-typed or custom store that omits them (real
+  `BaseStore` subclasses always define them). It now falls back to `False` /
+  `None`, matching the tolerance the migration paths already extend to external
+  stores that return `value=None`.
 - **The batch runners now honour an `on_unknown_revision` policy, so a single
   checkpoint/item tagged with a revision absent from the registry no longer
   aborts the whole run.** The lazy paths (`MigrationInterceptor`,

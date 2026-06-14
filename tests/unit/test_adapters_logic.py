@@ -208,6 +208,18 @@ def test_redis_revision_from_metadata_variants():
     assert f(123) is None  # non-dict, non-str
 
 
+def test_redis_revision_from_metadata_handles_bytes():
+    # A Redis client not in decode_responses mode returns the serialized
+    # metadata as raw bytes. It must be parsed (not misread as untagged, which
+    # would flag every current checkpoint as stale).
+    f = RedisAdapter._revision_from_metadata
+    assert f(json.dumps({"langmigrate_rev": "v3"}).encode()) == "v3"  # bytes
+    assert f(bytearray(json.dumps({"langmigrate_rev": "v4"}), "utf-8")) == "v4"  # bytearray
+    assert f(json.dumps({"source": "loop"}).encode()) is None  # tagless bytes
+    assert f(b"{not valid json") is None  # malformed bytes -> tolerated
+    assert f(b"\xff\xfe") is None  # non-UTF-8 bytes -> tolerated, not crashed on
+
+
 def test_redis_first_helper():
     fields = {"$.thread_id": ["t1"], "$.empty": [], "$.checkpoint_ns": [""]}
     assert _first(fields, "$.thread_id") == "t1"

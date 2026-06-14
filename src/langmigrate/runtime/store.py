@@ -72,8 +72,12 @@ class MigrationStore(BaseStore):
         self.on_unknown_revision = on_unknown_revision
         self.on_reserved_key_collision = on_reserved_key_collision
         # Mirror the wrapped store's TTL surface so ttl= arguments validate alike.
-        self.supports_ttl = store.supports_ttl
-        self.ttl_config = store.ttl_config
+        # ``getattr`` with defaults keeps the wrapper usable over a duck-typed or
+        # custom store that doesn't declare these (real ``BaseStore`` subclasses
+        # always do) — the same tolerance the migration paths extend to external
+        # stores returning ``value=None``.
+        self.supports_ttl = getattr(store, "supports_ttl", False)
+        self.ttl_config = getattr(store, "ttl_config", None)
 
     # -- the whole BaseStore API routes through batch/abatch -----------------
 

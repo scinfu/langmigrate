@@ -202,3 +202,36 @@ def test_empty_registry_is_passthrough():
     # Neither tagged on write nor migrated on read.
     assert raw.get(NS, "m1").value == {"msgs": ["hi"]}
     assert store.get(NS, "m1").value == {"msgs": ["hi"]}
+
+
+def test_wraps_duck_typed_store_without_ttl_attributes():
+    # A custom/duck-typed store that routes through batch but doesn't declare the
+    # TTL surface must still be wrappable (real BaseStore subclasses always do).
+    # Regression guard: __init__ used to read store.supports_ttl unconditionally.
+    from langgraph.store.base import GetOp, Item
+
+    class _MinimalStore:
+        # No supports_ttl / ttl_config attributes on purpose.
+        def batch(self, ops):
+            return [
+                Item(
+                    namespace=tuple(op.namespace),
+                    key=op.key,
+                    value={"msgs": ["hi"]},
+                    created_at="2026-01-01T00:00:00+00:00",
+                    updated_at="2026-01-01T00:00:00+00:00",
+                )
+                if isinstance(op, GetOp)
+                else None
+                for op in ops
+            ]
+
+        async def abatch(self, ops):
+            return self.batch(ops)
+
+    store = MigrationStore(_MinimalStore(), engine(), write_back=False)
+    assert store.supports_ttl is False
+    assert store.ttl_config is None
+    # And it still functions: the legacy item is migrated on read.
+    item = store.get(NS, "m1")
+    assert item.value == {"messages": ["hi"], "context": {}}

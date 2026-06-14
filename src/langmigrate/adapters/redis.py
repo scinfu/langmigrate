@@ -96,11 +96,15 @@ class RedisAdapter:
 
     @staticmethod
     def _revision_from_metadata(metadata: Any) -> str | None:
-        # Stored as a serialized JSON string (occasionally already a dict).
-        if isinstance(metadata, str):
+        # Stored as a serialized JSON string — or raw ``bytes`` when the Redis
+        # client is not in ``decode_responses`` mode (``json.loads`` accepts
+        # both), or occasionally an already-decoded ``dict``. Anything else (or
+        # a malformed / non-UTF-8 payload) is treated as untagged rather than
+        # crashing the enumeration sweep.
+        if isinstance(metadata, (str, bytes, bytearray)):
             try:
                 metadata = json.loads(metadata)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 return None
         return read_revision(metadata if isinstance(metadata, dict) else None)
 

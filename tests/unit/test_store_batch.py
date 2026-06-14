@@ -160,3 +160,50 @@ def test_store_batch_downgrade_skips_untagged():
     assert result.total == 1
     assert result.migrated == 0
     assert raw.get(NS, "a").value == {"count": 1}
+
+
+def test_store_batch_downgrade_dry_run_validates_without_writing():
+    raw = InMemoryStore()
+    raw.put(NS, "a", {"count": 1})
+    adapter = InMemoryStoreAdapter(raw)
+    run_store_batch_upgrade(adapter, engine(), target="head")
+
+    result = run_store_batch_downgrade(adapter, engine(), None, dry_run=True)
+
+    assert result.dry_run is True
+    assert result.migrated == 1  # counted as would-migrate
+    # ...but the store is untouched: still tagged and still carrying `context`.
+    value = raw.get(NS, "a").value
+    assert value[REVISION_METADATA_KEY] == "v1"
+    assert value["context"] == {}
+
+
+def test_store_batch_downgrade_to_same_revision_is_noop():
+    raw = InMemoryStore()
+    raw.put(NS, "a", {"count": 1})
+    adapter = InMemoryStoreAdapter(raw)
+    run_store_batch_upgrade(adapter, engine(), target="head")
+
+    # Downgrade target == current revision: nothing to reverse (new_env is envelope).
+    result = run_store_batch_downgrade(adapter, engine(), "v1")
+
+    assert result.total == 1
+    assert result.migrated == 0
+    assert raw.get(NS, "a").value[REVISION_METADATA_KEY] == "v1"
+
+
+def test_store_batch_downgrade_continue_on_error():
+    raw = InMemoryStore()
+    raw.put(NS, "ok", {"count": 1})
+    adapter = InMemoryStoreAdapter(raw)
+    run_store_batch_upgrade(adapter, engine(), target="head")
+    # Seed an already-upgraded poisoned item so only its *downgrade* fails.
+    raw.put(NS, "bad", {"count": 2, "poison": True, "context": {}, REVISION_METADATA_KEY: "v1"})
+
+    result = run_store_batch_downgrade(adapter, engine(), None, continue_on_error=True)
+
+    assert result.failed == 1
+    assert result.failures[0].error_type == "ValueError"
+    assert not result.ok
+    # The healthy item was still reverted despite the poisoned one failing.
+    assert raw.get(NS, "ok").value == {"count": 1}

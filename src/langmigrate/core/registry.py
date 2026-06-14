@@ -302,9 +302,15 @@ class MigrationRegistry:
                     color[rev] = BLACK
                     path.pop()
                     continue
-                if color[rev] == BLACK:
+                # Defensive guards: a node is only ever pushed as ``(rev, False)``
+                # while WHITE (the filter at the bottom of this loop), and LIFO
+                # ordering drives each node to BLACK before any sibling re-scans
+                # it — so a popped ``(rev, False)`` is always still WHITE here.
+                # Real cycles are caught by the parent-GRAY and self-loop checks
+                # below. These two branches are unreachable belt-and-suspenders.
+                if color[rev] == BLACK:  # pragma: no cover - defensive
                     continue
-                if color[rev] == GRAY:
+                if color[rev] == GRAY:  # pragma: no cover - defensive
                     raise CyclicHistoryError(path[path.index(rev) :] + [rev])
                 color[rev] = GRAY
                 path.append(rev)

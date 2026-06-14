@@ -120,6 +120,30 @@ async def test_middleware_async_hooks_migrate(stub_langchain):
     assert update["messages"] == ["hi"]
     assert update["langmigrate_rev"] == "v2"
 
+    # abefore_model migrates a mid-loop resume too.
+    update_model = await mw.abefore_model({"msgs": ["yo"], "count": 2})
+    assert update_model["messages"] == ["yo"]
+    assert update_model["langmigrate_rev"] == "v2"
+
+
+def test_middleware_resolves_engine_from_migrations_path(stub_langchain, tmp_path):
+    # Building the middleware from a directory path (not a prebuilt engine)
+    # discovers the revisions via MigrationRegistry.from_path.
+    (tmp_path / "a1_add_context.py").write_text(
+        "from langmigrate.core.migration import BaseMigration\n"
+        "class M(BaseMigration):\n"
+        "    revision = 'a1'\n"
+        "    down_revision = None\n"
+        "    def upgrade(self, s): return self.add_field(s, 'context', default={})\n"
+        "    def downgrade(self, s): return self.drop_field(s, 'context')\n"
+    )
+    mod = importlib.import_module("langmigrate.integrations.langchain")
+    mw = mod.SchemaMigrationMiddleware(str(tmp_path))
+
+    update = mw.before_agent({"count": 1})
+    assert update["context"] == {}
+    assert update["langmigrate_rev"] == "a1"
+
 
 def test_middleware_class_identity_is_stable(stub_langchain):
     # Regression: __getattr__ used to rebuild the class on every access, so two

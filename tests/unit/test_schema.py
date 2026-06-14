@@ -91,3 +91,51 @@ def test_type_name_renders_unions_and_none():
 def test_introspect_rejects_non_schema_object():
     with pytest.raises(TypeError):
         introspect(42)
+
+
+def test_type_name_annotated_with_type_metadata():
+    from typing import Annotated
+
+    from langmigrate.core.schema import _type_name
+
+    # Metadata that is itself a type is rendered via its type name, not repr.
+    assert _type_name(Annotated[int, str]) == "Annotated[int, str]"
+
+
+def test_type_name_renders_bare_tuple_and_list():
+    from langmigrate.core.schema import _type_name
+
+    assert _type_name((int, str)) == "(int, str)"
+    assert _type_name([int, str]) == "[int, str]"
+
+
+def test_type_name_falls_back_to_str_for_unknown():
+    from langmigrate.core.schema import _type_name
+
+    # An annotation that is neither a typing construct, type, list/tuple nor
+    # ForwardRef falls through to the str() rendering.
+    assert _type_name(42) == "42"
+
+
+def test_introspect_pydantic_falls_back_when_type_hints_fail(monkeypatch):
+    # If get_type_hints raises (e.g. an unresolvable forward ref), introspection
+    # must fall back to each field's raw annotation rather than crash.
+    import langmigrate.core.schema as schema_mod
+
+    def _boom(*args, **kwargs):
+        raise NameError("unresolved forward ref")
+
+    monkeypatch.setattr(schema_mod, "get_type_hints", _boom)
+    # The fallback renders each field's raw annotation directly.
+    assert introspect(PydState) == {"messages": "list[str]", "count": "int", "context": "dict"}
+
+
+def test_render_bodies_emits_todo_for_non_builtin_downgrade():
+    from langmigrate.core.schema import SchemaDiff
+
+    # OLD type is non-builtin -> the downgrade coercion gets a TODO comment line.
+    diff = SchemaDiff(changed={"tags": ("list[int]", "str")})
+    up, down = render_bodies(diff)
+
+    assert any("TODO" in line for line in down)
+    assert not any("TODO" in line for line in up)  # new type 'str' is builtin

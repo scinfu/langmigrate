@@ -11,13 +11,15 @@ import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+import pytest
+import typer
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 from typer.testing import CliRunner
 
 from langmigrate.cli import main as cli_main
 from langmigrate.cli.main import app
-from langmigrate.config import DEFAULT_CONFIG_TOML
+from langmigrate.config import DEFAULT_CONFIG_TOML, LangMigrateConfig
 from langmigrate.core.types import REVISION_METADATA_KEY
 from langmigrate.core.version import read_revision
 
@@ -415,3 +417,197 @@ def test_init_with_store_scaffolds_directory(tmp_path):
     assert result.exit_code == 0, result.output
     assert (tmp_path / "store_migrations").is_dir()
     assert (tmp_path / "store_migrations" / "__init__.py").is_file()
+
+
+# -- adapter factories (no real connection) ----------------------------------
+
+
+def test_build_adapter_redis_and_postgres(monkeypatch):
+    import langmigrate.adapters.postgres as pg_mod
+    import langmigrate.adapters.redis as redis_mod
+
+    redis_sentinel, pg_sentinel = object(), object()
+    monkeypatch.setattr(redis_mod.RedisAdapter, "from_conn_string", lambda url: redis_sentinel)
+    monkeypatch.setattr(pg_mod.PostgresAdapter, "from_conn_string", lambda url: pg_sentinel)
+
+    redis_cfg = LangMigrateConfig(backend="redis", url="redis://x")
+    pg_cfg = LangMigrateConfig(backend="postgres", url="postgres://x")
+    assert cli_main._build_adapter(redis_cfg) is redis_sentinel
+    assert cli_main._build_adapter(pg_cfg) is pg_sentinel
+
+
+def test_build_store_adapter_postgres(monkeypatch):
+    import langmigrate.adapters.postgres as pg_mod
+
+    sentinel = object()
+    monkeypatch.setattr(pg_mod.PostgresStoreAdapter, "from_conn_string", lambda url: sentinel)
+    assert (
+        cli_main._build_store_adapter(LangMigrateConfig(backend="postgres", url="postgres://x"))
+        is sentinel
+    )
+
+
+def test_build_store_adapter_rejects_redis_and_unknown_and_missing_url():
+    with pytest.raises(typer.Exit):
+        cli_main._build_store_adapter(LangMigrateConfig(backend="redis", url="redis://x"))
+    with pytest.raises(typer.Exit):
+        cli_main._build_store_adapter(LangMigrateConfig(backend="sqlite", url="x"))
+    with pytest.raises(typer.Exit):
+        cli_main._build_store_adapter(LangMigrateConfig(backend="postgres", url=None))
+
+
+# -- history / current with multiple heads -----------------------------------
+
+_MIG_BASE = """
+from langmigrate import BaseMigration
+class M(BaseMigration):
+    revision = "base0"
+    down_revision = None
+    def upgrade(self, s): return s
+    def downgrade(self, s): return s
+"""
+_MIG_HEAD_A = """
+from langmigrate import BaseMigration
+class M(BaseMigration):
+    revision = "heada"
+    down_revision = "base0"
+    def upgrade(self, s): return s
+    def downgrade(self, s): return s
+"""
+_MIG_HEAD_B = """
+from langmigrate import BaseMigration
+class M(BaseMigration):
+    revision = "headb"
+    down_revision = "base0"
+    def upgrade(self, s): return s
+    def downgrade(self, s): return s
+"""
+
+
+def _multihead_project(tmp_path) -> None:
+    (tmp_path / "langmigrate.toml").write_text(DEFAULT_CONFIG_TOML)
+    migs = tmp_path / "migrations"
+    migs.mkdir()
+    (migs / "base0.py").write_text(_MIG_BASE)
+    (migs / "heada.py").write_text(_MIG_HEAD_A)
+    (migs / "headb.py").write_text(_MIG_HEAD_B)
+
+
+def test_history_dedups_shared_ancestor_across_heads(tmp_path):
+    _multihead_project(tmp_path)
+    with chdir(tmp_path):
+        result = runner.invoke(app, ["history"])
+    assert result.exit_code == 0, result.output
+    # `base0` is shared by both heads but printed as a row once (de-dup across
+    # lineages): it is the only base, so "(base)" appears exactly once.
+    assert result.output.count("(base)") == 1
+    assert "heada" in result.output and "headb" in result.output
+
+
+def test_current_reports_multiple_heads(tmp_path):
+    _multihead_project(tmp_path)
+    with chdir(tmp_path):
+        result = runner.invoke(app, ["current"])
+    # Multiple heads are surfaced (warning), not a crash.
+    assert "Multiple heads" in result.output or "heads" in result.output.lower()
+
+
+# -- misc helper branches -----------------------------------------------------
+
+
+def test_upgrade_rejects_invalid_unknown_revision_policy(tmp_path, monkeypatch):
+    adapter = _project(tmp_path)
+    _patch_adapter(monkeypatch, adapter)
+    with chdir(tmp_path):
+        result = runner.invoke(app, ["upgrade", "head", "--on-unknown-revision", "bogus"])
+    assert result.exit_code == 1
+    assert "Invalid --on-unknown-revision" in result.output
+
+
+def test_report_batch_result_truncates_long_failure_list():
+    from langmigrate.runtime.batch import BatchFailure, BatchResult
+
+    failures = [BatchFailure(ref=f"r{i}", error="e", error_type="ValueError") for i in range(25)]
+    result = BatchResult(
+        target="head", total=25, migrated=0, dry_run=False, failed=25, failures=failures
+    )
+    with pytest.raises(typer.Exit):
+        cli_main._report_batch_result(result)
+
+
+def test_downgrade_command_succeeds(tmp_path, monkeypatch):
+    adapter = _project(tmp_path)
+    _patch_adapter(monkeypatch, adapter)
+    with chdir(tmp_path):
+        runner.invoke(app, ["upgrade", "head"])
+        result = runner.invoke(app, ["downgrade", "base"])
+    assert result.exit_code == 0, result.output
+    assert "migrated" in result.output
+    (t,) = list(adapter.saver.list(None))
+    assert read_revision(t.metadata) is None  # downgraded past base -> untagged
+
+
+# -- store DB commands --------------------------------------------------------
+
+
+def test_store_current_db_shows_distribution(tmp_path, monkeypatch):
+    adapter = _store_project(tmp_path)
+    monkeypatch.setattr(cli_main, "_build_store_adapter", lambda cfg: adapter)
+    with chdir(tmp_path):
+        result = runner.invoke(app, ["store", "current", "--db"])
+    assert result.exit_code == 0, result.output
+    assert "code head: s1" in result.output
+    assert adapter.closed
+
+
+def test_store_upgrade_unknown_target_errors(tmp_path, monkeypatch):
+    adapter = _store_project(tmp_path)
+    monkeypatch.setattr(cli_main, "_build_store_adapter", lambda cfg: adapter)
+    with chdir(tmp_path):
+        result = runner.invoke(app, ["store", "upgrade", "ghost"])
+    assert result.exit_code == 1
+    assert "not found" in result.output
+
+
+def test_store_downgrade_command_reverts(tmp_path, monkeypatch):
+    adapter = _store_project(tmp_path)
+    monkeypatch.setattr(cli_main, "_build_store_adapter", lambda cfg: adapter)
+    with chdir(tmp_path):
+        runner.invoke(app, ["store", "upgrade", "head"])
+        result = runner.invoke(app, ["store", "downgrade", "base"])
+    assert result.exit_code == 0, result.output
+    assert "migrated" in result.output
+    item = adapter.store.get(("memories", "u1"), "m1")
+    assert REVISION_METADATA_KEY not in item.value  # tag stripped at base
+
+
+def test_store_stamp_yes_tags(tmp_path, monkeypatch):
+    adapter = _store_project(tmp_path)
+    monkeypatch.setattr(cli_main, "_build_store_adapter", lambda cfg: adapter)
+    with chdir(tmp_path):
+        result = runner.invoke(app, ["store", "stamp", "s1", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "Stamped 1" in result.output
+    item = adapter.store.get(("memories", "u1"), "m1")
+    assert item.value[REVISION_METADATA_KEY] == "s1"
+
+
+def test_store_stamp_requires_confirmation(tmp_path, monkeypatch):
+    adapter = _store_project(tmp_path)
+    monkeypatch.setattr(cli_main, "_build_store_adapter", lambda cfg: adapter)
+    with chdir(tmp_path):
+        # Decline the confirmation prompt -> aborted, nothing stamped.
+        result = runner.invoke(app, ["store", "stamp", "s1"], input="n\n")
+    assert result.exit_code != 0
+    assert "WARNING" in result.output
+    item = adapter.store.get(("memories", "u1"), "m1")
+    assert REVISION_METADATA_KEY not in item.value
+
+
+def test_store_downgrade_unknown_target_errors(tmp_path, monkeypatch):
+    adapter = _store_project(tmp_path)
+    monkeypatch.setattr(cli_main, "_build_store_adapter", lambda cfg: adapter)
+    with chdir(tmp_path):
+        result = runner.invoke(app, ["store", "downgrade", "ghost"])
+    assert result.exit_code == 1
+    assert "not found" in result.output

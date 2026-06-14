@@ -14,7 +14,11 @@ import json
 import pytest
 
 from langmigrate.adapters import postgres as pg
-from langmigrate.adapters.postgres import PostgresAdapter, PostgresStoreAdapter
+from langmigrate.adapters.postgres import (
+    AsyncPostgresAdapter,
+    PostgresAdapter,
+    PostgresStoreAdapter,
+)
 from langmigrate.adapters.redis import RedisAdapter, _first
 
 # -- fake psycopg connection --------------------------------------------------
@@ -64,6 +68,41 @@ class _FakeConn:
 
 def _rows(*threads: str) -> list[dict]:
     return [{"thread_id": t, "checkpoint_ns": "", "checkpoint_id": f"c-{t}"} for t in threads]
+
+
+# -- fake async psycopg connection -------------------------------------------
+
+
+class _AsyncFakeCursor:
+    def __init__(self, conn: _AsyncFakeConn) -> None:
+        self._conn = conn
+
+    async def __aenter__(self) -> _AsyncFakeCursor:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def execute(self, sql: str, params: tuple = ()) -> None:
+        self._conn.executed.append((" ".join(sql.split()), tuple(params)))
+        self._conn._current = self._conn._results.pop(0) if self._conn._results else []
+
+    async def fetchall(self) -> list:
+        return list(self._conn._current)
+
+
+class _AsyncFakeConn:
+    def __init__(self, results: list | None = None) -> None:
+        self.executed: list[tuple[str, tuple]] = []
+        self._results: list = list(results or [])
+        self._current: list = []
+        self.closed = False
+
+    def cursor(self) -> _AsyncFakeCursor:
+        return _AsyncFakeCursor(self)
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 # -- Postgres checkpoint adapter ---------------------------------------------
@@ -160,6 +199,44 @@ def test_pg_close_closes_connection():
     assert conn.closed is True
 
 
+def test_pg_adapter_context_manager_closes():
+    conn = _FakeConn()
+    with PostgresAdapter(conn, saver=None) as adapter:  # type: ignore[arg-type]
+        assert adapter is not None
+    assert conn.closed is True
+
+
+# -- async Postgres checkpoint adapter ---------------------------------------
+
+
+async def test_async_pg_iter_all_configs_keyset_pagination(monkeypatch):
+    monkeypatch.setattr(pg, "_PAGE_SIZE", 2)
+    conn = _AsyncFakeConn(results=[_rows("t1", "t2"), _rows("t3")])
+    adapter = AsyncPostgresAdapter(conn, saver=None)  # type: ignore[arg-type]
+
+    out = [c["configurable"]["thread_id"] async for c in adapter.aiter_all_configs()]
+    assert out == ["t1", "t2", "t3"]
+
+    sql1, params1 = conn.executed[0]
+    assert "WHERE" not in sql1 and params1 == (2,)
+    sql2, params2 = conn.executed[1]
+    assert "(thread_id, checkpoint_ns, checkpoint_id) > (%s, %s, %s)" in sql2
+    assert params2 == ("t2", "", "c-t2", 2)  # keyset carries last row of page 1
+
+
+async def test_async_pg_iter_stale_and_context_manager(monkeypatch):
+    monkeypatch.setattr(pg, "_PAGE_SIZE", 2)
+    conn = _AsyncFakeConn(results=[_rows("t1")])  # single short page -> one query
+
+    async with AsyncPostgresAdapter(conn, saver=None) as adapter:  # type: ignore[arg-type]
+        out = [c["configurable"]["thread_id"] async for c in adapter.aiter_stale_configs("v2")]
+
+    assert out == ["t1"]
+    assert conn.closed is True  # __aexit__ -> aclose
+    sql1, params1 = conn.executed[0]
+    assert "IS DISTINCT FROM %s" in sql1 and params1 == ("v2", 2)
+
+
 # -- Postgres store adapter ---------------------------------------------------
 
 
@@ -193,6 +270,24 @@ def test_pg_store_stamp_all():
     assert adapter.stamp_all("s1") == 7
     sql, _ = conn.executed[0]
     assert "UPDATE store SET value" in sql and "jsonb_set" in sql
+
+
+def test_pg_store_iter_all_items_has_no_filter():
+    conn = _FakeConn(results=[[{"prefix": "a.b", "key": "k1"}]])
+    adapter = PostgresStoreAdapter(conn, store=None)  # type: ignore[arg-type]
+
+    out = list(adapter.iter_all_items())
+    assert out == [(("a", "b"), "k1")]
+
+    sql1, params1 = conn.executed[0]
+    assert "WHERE" not in sql1  # iter_all has no stale predicate
+
+
+def test_pg_store_adapter_context_manager_closes():
+    conn = _FakeConn()
+    with PostgresStoreAdapter(conn, store=None) as adapter:  # type: ignore[arg-type]
+        assert adapter is not None
+    assert conn.closed is True
 
 
 # -- Redis adapter: pure helpers ---------------------------------------------
@@ -312,3 +407,61 @@ def test_redis_iter_docs_skips_empty_json_get():
     adapter = RedisAdapter(_Saver({"checkpoint:t1::c-t1": _redis_doc("t1", "v1")}))  # type: ignore[arg-type]
     # A doc that returns no fields is skipped, not crashed on.
     assert list(adapter.iter_all_configs()) == []
+
+
+def test_redis_setup_close_and_context_manager():
+    pytest.importorskip("langgraph.checkpoint.redis.util")
+
+    class _Saver:
+        def __init__(self) -> None:
+            self.setup_called = False
+            self._redis = _FakeRedisClient({})
+
+        def setup(self) -> None:
+            self.setup_called = True
+
+    saver = _Saver()
+    # __enter__ returns the adapter; setup() delegates to the saver; __exit__ ->
+    # close() -> _client().close(). The fake client has no close(); close() is
+    # best-effort and suppresses that error rather than propagating it.
+    with RedisAdapter(saver) as adapter:  # type: ignore[arg-type]
+        adapter.setup()
+    assert saver.setup_called is True
+
+
+def test_redis_stamp_all_stamps_and_skips_missing_tuple():
+    pytest.importorskip("langgraph.checkpoint.redis.util")
+    from langgraph.checkpoint.base import CheckpointTuple, empty_checkpoint
+
+    docs = {
+        "checkpoint:t1::c-t1": _redis_doc("t1", "v1"),
+        "checkpoint:t2::c-t2": _redis_doc("t2", "v1"),
+    }
+
+    class _Saver:
+        def __init__(self) -> None:
+            self._redis = _FakeRedisClient(docs)
+            self.puts: list = []
+
+        def get_tuple(self, config):
+            # t2 vanished between enumeration and fetch -> skipped.
+            if config["configurable"]["thread_id"] == "t2":
+                return None
+            cp = empty_checkpoint()
+            cp["channel_values"] = {"x": 1}
+            return CheckpointTuple(
+                config=config, checkpoint=cp, metadata={"source": "loop"}, parent_config=None
+            )
+
+        def put(self, config, checkpoint, metadata, versions):
+            self.puts.append((config, metadata))
+            return config
+
+    saver = _Saver()
+    adapter = RedisAdapter(saver)  # type: ignore[arg-type]
+
+    assert adapter.stamp_all("v2") == 1  # t1 stamped, t2 skipped
+    (config, metadata) = saver.puts[0]
+    assert metadata["langmigrate_rev"] == "v2"
+    # Root checkpoint (no parent_config) is re-put under a parentless config.
+    assert "checkpoint_id" not in config["configurable"]

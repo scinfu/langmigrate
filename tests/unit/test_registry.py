@@ -251,3 +251,49 @@ def test_merge_with_duplicate_parent_rejected():
 def test_cycle_through_tuple_parents_detected():
     with pytest.raises(CyclicHistoryError):
         MigrationRegistry.from_migrations([_mk("x", ("y",)), _mk("y", ("x",))])
+
+
+def test_ancestors_of_merge_traverses_shared_grandparent_once():
+    # ancestors(merge) reaches `base` via both `a` and `b`; the second visit
+    # is short-circuited (the de-dup `continue` in the traversal).
+    reg = diamond()
+    assert reg.ancestors("merge") == frozenset({"base", "a", "b"})
+
+
+def test_ancestors_unknown_grandparent_raises_during_merge_validation():
+    # The merge is validated first; its redundant-parent check walks ancestors of
+    # `a`, which points at a revision absent from the registry -> RevisionNotFoundError
+    # surfaces from `ancestors`, not the per-migration parent check.
+    with pytest.raises(RevisionNotFoundError):
+        MigrationRegistry.from_migrations([_mk("m", ("a", "b")), _mk("a", "ghost"), _mk("b", None)])
+
+
+def test_downgrade_path_to_self_is_empty():
+    reg = diamond()
+    assert reg.downgrade_path("merge", "merge") == []
+
+
+def test_migration_meta_carries_identity():
+    m = _mk("child", "parent")
+    meta = m.meta
+    assert meta.revision == "child"
+    assert meta.down_revision == "parent"
+
+
+def test_ancestors_dedups_revisit_in_uncached_nested_diamond():
+    # `M` is validated before the nested merge `N`, so M's redundant-parent check
+    # walks `a`'s ancestry while c/d/base are still uncached: `base` is reached via
+    # both `c` and `d`, exercising the de-dup short-circuit in `ancestors`.
+    reg = MigrationRegistry.from_migrations(
+        [
+            _mk("M", ("a", "b")),
+            _mk("a", "N"),
+            _mk("b", "base"),
+            _mk("N", ("c", "d")),
+            _mk("c", "base"),
+            _mk("d", "base"),
+            _mk("base", None),
+        ]
+    )
+    assert reg.head() == "M"
+    assert reg.ancestors("M") == frozenset({"a", "b", "N", "c", "d", "base"})

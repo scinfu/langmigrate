@@ -91,3 +91,25 @@ def test_setup_langmigrate_str_path(tmp_path):
 def test_missing_directory_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         setup_langmigrate(InMemorySaver(), tmp_path / "does_not_exist")
+
+
+def test_setup_langmigrate_store_wraps_store(tmp_path):
+    from langgraph.store.memory import InMemoryStore
+
+    from langmigrate import MigrationStore, setup_langmigrate_store
+
+    mig_dir = _write_migration(tmp_path)
+    raw = InMemoryStore()
+    store = setup_langmigrate_store(
+        raw, mig_dir, write_back=False, on_reserved_key_collision="error"
+    )
+
+    assert isinstance(store, MigrationStore)
+    assert store.engine.head() == "v1"
+    assert store.write_back is False
+    assert store.on_reserved_key_collision == "error"
+
+    # And it actually migrates: a legacy item gains the default + tag on read.
+    raw.put(("ns",), "k", {"x": 1})
+    item = store.get(("ns",), "k")
+    assert item.value == {"x": 1, "context": {}}

@@ -96,7 +96,9 @@ class MigrationEngine:
         # downgrade`` command treats "downgrade to a higher revision" as a clear
         # user mistake rather than silently doing nothing.
         path = self.registry.downgrade_path(state.revision, target)
-        if not path:
+        if not path:  # pragma: no cover - defensive: unreachable once state.revision != target
+            # ``downgrade_path`` only returns ``[]`` for target == from_revision,
+            # which the equality check above already short-circuits.
             return state
         current = state
         for rev in path:

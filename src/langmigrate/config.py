@@ -18,7 +18,7 @@ from pathlib import Path
 
 try:  # Python 3.11+
     import tomllib
-except ModuleNotFoundError:  # Python 3.10
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only (tomllib is stdlib on 3.11+)
     import tomli as tomllib  # type: ignore[no-redef,import-not-found,unused-ignore]
 
 DEFAULT_CONFIG_FILE = "langmigrate.toml"

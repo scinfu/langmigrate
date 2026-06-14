@@ -34,6 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   middleware never passed the policy through to `migrate_state_update`, so it
   was stuck on the `"warn"` default and `"error"` could not be selected on that
   path.
+- **`revision --autogenerate` after a merge now diffs against both branches.**
+  The autogenerate baseline (`_baseline_fields`) walked the lineage and returned
+  the *first* `fields` snapshot it found, so for a merge — whose own snapshot is
+  `None` — it picked one parent branch arbitrarily. The new code schema was then
+  diffed against only that branch: fields living solely on the other branch were
+  reported as spurious additions, and — worse — a field the new schema *drops*
+  or *retypes* would be missed entirely if it came from the unpicked branch,
+  silently leaving it out of the generated migration. The baseline is now
+  reconstructed as the **union of the schemas after each parent**, so a
+  post-merge autogenerate sees the full pre-merge schema. Linear histories are
+  unaffected (a revision's own snapshot, or the nearest ancestor's, is used).
 
 ## [1.2.2] — 2026-06-14
 

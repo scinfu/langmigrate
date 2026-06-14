@@ -97,6 +97,58 @@ def test_autogenerate_reports_unloadable_schema(tmp_path):
     assert "Could not load schema" in result.output
 
 
+def _mk(rev, down, fields):
+    from langmigrate.core.migration import BaseMigration
+
+    class M(BaseMigration):
+        revision = rev
+        down_revision = down
+
+        def upgrade(self, state):
+            return state
+
+        def downgrade(self, state):
+            return state
+
+    M.fields = fields
+    return M()
+
+
+def test_baseline_fields_unions_both_branches_after_merge():
+    # Regression: after a merge the autogenerate baseline used to pick a single
+    # branch's snapshot arbitrarily, so a diff against the new code schema missed
+    # drops/coercions for fields living only on the other branch (and emitted
+    # spurious adds). The baseline must be the UNION of both branches' schemas.
+    from langmigrate.cli.main import _baseline_fields
+
+    base = _mk("aaaa", None, {"common": "int"})
+    b1 = _mk("bbbb", "aaaa", {"common": "int", "b1_only": "str"})
+    b2 = _mk("cccc", "aaaa", {"common": "int", "c2_only": "float"})
+    merge = _mk("dddd", ("bbbb", "cccc"), None)  # merge carries no snapshot
+    registry = MigrationRegistry.from_migrations([base, b1, b2, merge])
+
+    assert _baseline_fields(registry, "dddd") == {
+        "common": "int",
+        "b1_only": "str",
+        "c2_only": "float",
+    }
+
+
+def test_baseline_fields_uses_nearest_snapshot_for_linear_history():
+    # A linear revision with its own snapshot is the baseline directly; a
+    # hand-written (snapshot-less) tip falls back to the nearest ancestor snapshot.
+    from langmigrate.cli.main import _baseline_fields
+
+    base = _mk("aaaa", None, {"a": "int"})
+    mid = _mk("bbbb", "aaaa", {"a": "int", "b": "str"})
+    tip = _mk("cccc", "bbbb", None)  # hand-written, no snapshot
+    registry = MigrationRegistry.from_migrations([base, mid, tip])
+
+    assert _baseline_fields(registry, "bbbb") == {"a": "int", "b": "str"}
+    assert _baseline_fields(registry, "cccc") == {"a": "int", "b": "str"}
+    assert _baseline_fields(registry, None) == {}
+
+
 def test_autogenerate_reports_no_changes_against_head_snapshot(tmp_path):
     _write_schema_module(tmp_path, "myschema", SCHEMA_V1)
     sys.path.insert(0, str(tmp_path))

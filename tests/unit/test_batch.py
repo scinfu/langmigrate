@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
+import pytest
 from langgraph.checkpoint.base import Checkpoint, empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 
 from langmigrate.core.engine import MigrationEngine
+from langmigrate.core.exceptions import RevisionNotFoundError
 from langmigrate.core.migration import BaseMigration
 from langmigrate.core.registry import MigrationRegistry
 from langmigrate.core.types import REVISION_METADATA_KEY
@@ -299,6 +301,33 @@ def test_batch_upgrade_does_not_use_count_stale():
     assert CountingAdapter.count_stale_calls == 0
 
 
+def test_batch_upgrade_skips_missing_tuple():
+    ghost = {"configurable": {"thread_id": "ghost", "checkpoint_ns": "", "checkpoint_id": "x"}}
+
+    class _GhostAdapter(InMemoryAdapter):
+        def iter_stale_configs(self, head):
+            yield ghost
+
+    result = run_batch_upgrade(_GhostAdapter(InMemorySaver()), engine(), target="head")
+
+    assert result.total == 1 and result.migrated == 0  # get_tuple -> None -> skipped
+
+
+def test_batch_upgrade_noop_when_enumerated_but_already_current():
+    saver = InMemorySaver()
+    seed(saver, "a")
+    run_batch_upgrade(InMemoryAdapter(saver), engine(), target="head")  # now at v1
+
+    # An adapter that still enumerates the (now current) config as "stale".
+    class _AlwaysStale(InMemoryAdapter):
+        def iter_stale_configs(self, head):
+            yield from self.iter_all_configs()
+
+    result = run_batch_upgrade(_AlwaysStale(saver), engine(), target="head")
+
+    assert result.total == 1 and result.migrated == 0  # _plan_upgrade -> None (no-op)
+
+
 def test_batch_downgrade_continue_on_error_collects_failures():
     saver = InMemorySaver()
     seed_count(saver, "ok", 1)
@@ -319,6 +348,50 @@ def test_batch_downgrade_continue_on_error_collects_failures():
     }
     assert healed["ok"] is None  # downgraded past base -> untagged
     assert healed["bad"] == "p1"  # left as-is, recorded as failure
+
+
+def test_batch_downgrade_skips_missing_tuple():
+    ghost = {"configurable": {"thread_id": "ghost", "checkpoint_ns": "", "checkpoint_id": "x"}}
+
+    class _GhostAdapter(InMemoryAdapter):
+        def iter_all_configs(self):
+            yield ghost
+
+    result = run_batch_downgrade(_GhostAdapter(InMemorySaver()), engine(), None)
+
+    assert result.total == 1 and result.migrated == 0  # get_tuple -> None -> skipped
+
+
+def test_batch_downgrade_raises_on_unknown_revision_by_default():
+    import pytest
+
+    saver = InMemorySaver()
+    seed(saver, "a")
+    # Stamp with a revision absent from the registry (code-rollback case).
+    (t,) = list(saver.list(None))
+    meta = dict(t.metadata or {})
+    meta[REVISION_METADATA_KEY] = "v99"
+    saver.put(t.config, t.checkpoint, meta, {})
+    adapter = InMemoryAdapter(saver)
+
+    with pytest.raises(RevisionNotFoundError):
+        run_batch_downgrade(adapter, engine(), None)
+
+
+@pytest.mark.parametrize("policy", ["warn", "pass"])
+def test_batch_downgrade_skips_unknown_revision_under_policy(policy):
+    saver = InMemorySaver()
+    seed(saver, "a")
+    (t,) = list(saver.list(None))
+    meta = dict(t.metadata or {})
+    meta[REVISION_METADATA_KEY] = "v99"
+    saver.put(t.config, t.checkpoint, meta, {})
+    adapter = InMemoryAdapter(saver)
+
+    result = run_batch_downgrade(adapter, engine(), None, on_unknown_revision=policy)
+
+    assert result.total == 1 and result.migrated == 0 and result.ok
+    assert read_revision(next(iter(saver.list(None))).metadata) == "v99"  # untouched
 
 
 # -- async runners -------------------------------------------------------------
@@ -397,6 +470,44 @@ async def test_async_batch_upgrade_continue_on_error():
     assert result.failures[0].error_type == "ValueError"
 
 
+async def test_async_batch_upgrade_skips_missing_tuple():
+    from langmigrate.runtime.batch import arun_batch_upgrade
+
+    ghost = {"configurable": {"thread_id": "ghost", "checkpoint_ns": "", "checkpoint_id": "g"}}
+
+    class _GhostAdapter:
+        def __init__(self, saver: InMemorySaver) -> None:
+            self._saver = saver
+
+        @property
+        def saver(self) -> InMemorySaver:
+            return self._saver
+
+        async def aiter_stale_configs(self, head):
+            yield ghost
+
+    result = await arun_batch_upgrade(_GhostAdapter(InMemorySaver()), engine(), target="head")
+
+    assert result.total == 1 and result.migrated == 0  # aget_tuple -> None -> skipped
+
+
+async def test_async_batch_upgrade_noop_when_enumerated_but_already_current():
+    from langmigrate.runtime.batch import arun_batch_upgrade
+
+    saver = InMemorySaver()
+    seed(saver, "a")
+    await arun_batch_upgrade(AsyncInMemoryAdapter(saver), engine(), target="head")  # now at v1
+
+    class _AlwaysStale(AsyncInMemoryAdapter):
+        async def aiter_stale_configs(self, head):
+            async for cfg in self.aiter_all_configs():
+                yield cfg
+
+    result = await arun_batch_upgrade(_AlwaysStale(saver), engine(), target="head")
+
+    assert result.total == 1 and result.migrated == 0  # _plan_upgrade -> None (no-op)
+
+
 async def test_async_batch_downgrade_to_base():
     from langmigrate.runtime.batch import arun_batch_downgrade, arun_batch_upgrade
 
@@ -412,3 +523,88 @@ async def test_async_batch_downgrade_to_base():
     (t,) = list(saver.list(None))
     assert "context" not in t.checkpoint["channel_values"]
     assert read_revision(t.metadata) is None
+
+
+async def test_async_batch_downgrade_dry_run_does_not_write():
+    from langmigrate.runtime.batch import arun_batch_downgrade, arun_batch_upgrade
+
+    saver = InMemorySaver()
+    seed(saver, "a")
+    adapter = AsyncInMemoryAdapter(saver)
+    await arun_batch_upgrade(adapter, engine(), target="head")
+
+    result = await arun_batch_downgrade(adapter, engine(), None, dry_run=True)
+
+    assert result.dry_run and result.migrated == 1
+    (t,) = list(saver.list(None))
+    assert "context" in t.checkpoint["channel_values"]  # untouched
+    assert read_revision(t.metadata) == "v1"  # still tagged
+
+
+async def test_async_batch_downgrade_skips_untagged():
+    from langmigrate.runtime.batch import arun_batch_downgrade
+
+    saver = InMemorySaver()
+    seed(saver, "a")  # never upgraded -> untagged, nothing to reverse
+    adapter = AsyncInMemoryAdapter(saver)
+
+    result = await arun_batch_downgrade(adapter, engine(), None)
+
+    assert result.total == 1 and result.migrated == 0
+
+
+async def test_async_batch_downgrade_skips_missing_tuple():
+    from langmigrate.runtime.batch import arun_batch_downgrade
+
+    # A config the saver can't resolve (aget_tuple -> None).
+    ghost = {"configurable": {"thread_id": "ghost", "checkpoint_ns": "", "checkpoint_id": "g"}}
+
+    class _GhostAdapter:
+        def __init__(self, saver: InMemorySaver) -> None:
+            self._saver = saver
+
+        @property
+        def saver(self) -> InMemorySaver:
+            return self._saver
+
+        async def aiter_all_configs(self):
+            yield ghost
+
+    result = await arun_batch_downgrade(_GhostAdapter(InMemorySaver()), engine(), None)
+
+    assert result.total == 1 and result.migrated == 0
+
+
+async def test_async_batch_downgrade_continue_on_error():
+    from langmigrate.runtime.batch import arun_batch_downgrade
+
+    saver = InMemorySaver()
+    seed_count(saver, "ok", 1)
+    seed_count(saver, "bad", 666)
+    # Stamp both as p1 so the downgrade path runs (bad would otherwise fail upgrade).
+    for t in list(saver.list(None)):
+        meta = dict(t.metadata or {})
+        meta[REVISION_METADATA_KEY] = "p1"
+        saver.put(t.config, t.checkpoint, meta, {})
+    adapter = AsyncInMemoryAdapter(saver)
+
+    result = await arun_batch_downgrade(adapter, poison_engine(), None, continue_on_error=True)
+
+    assert result.failed == 1
+    assert result.failures[0].error_type == "ValueError"
+    assert not result.ok
+
+
+async def test_async_batch_downgrade_aborts_on_error_by_default():
+    from langmigrate.runtime.batch import arun_batch_downgrade
+
+    saver = InMemorySaver()
+    seed_count(saver, "bad", 666)
+    (t,) = list(saver.list(None))
+    meta = dict(t.metadata or {})
+    meta[REVISION_METADATA_KEY] = "p1"
+    saver.put(t.config, t.checkpoint, meta, {})
+    adapter = AsyncInMemoryAdapter(saver)
+
+    with pytest.raises(ValueError, match="poisoned"):
+        await arun_batch_downgrade(adapter, poison_engine(), None)

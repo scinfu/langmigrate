@@ -5,9 +5,11 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
+from langgraph.store.base import Item
 from langgraph.store.memory import InMemoryStore
 
 from langmigrate.core.engine import MigrationEngine
+from langmigrate.core.exceptions import RevisionNotFoundError
 from langmigrate.core.migration import BaseMigration
 from langmigrate.core.registry import MigrationRegistry
 from langmigrate.core.types import REVISION_METADATA_KEY
@@ -136,6 +138,47 @@ def test_store_batch_rerun_is_noop():
     assert second.migrated == 0
 
 
+def test_store_batch_upgrade_noop_when_enumerated_but_already_current():
+    raw = InMemoryStore()
+    raw.put(NS, "a", {"count": 1})
+    adapter = InMemoryStoreAdapter(raw)
+    run_store_batch_upgrade(adapter, engine(), target="head")  # now at v1
+
+    # An adapter that still enumerates the (now current) item as "stale".
+    class _AlwaysStale(InMemoryStoreAdapter):
+        def iter_stale_items(self, head):
+            yield from self.iter_all_items()
+
+    result = run_store_batch_upgrade(_AlwaysStale(raw), engine(), target="head")
+
+    assert result.total == 1 and result.migrated == 0  # new_env is envelope -> skipped
+
+
+def test_store_batch_upgrade_raises_on_unknown_revision_by_default():
+    raw = InMemoryStore()
+    raw.put(NS, "a", {"count": 1, REVISION_METADATA_KEY: "v99"})  # tag absent from registry
+    adapter = InMemoryStoreAdapter(raw)
+
+    with pytest.raises(RevisionNotFoundError):
+        run_store_batch_upgrade(adapter, engine(), target="head")
+
+
+def test_store_batch_upgrade_skips_missing_item():
+    # store.get returns None for an enumerated key (deleted between enumeration
+    # and fetch) -> counted in total but skipped, not crashed on.
+    class _GoneStore(InMemoryStore):
+        def get(self, namespace, key, *, refresh_ttl=None):
+            return None
+
+    class _AdHocAdapter(InMemoryStoreAdapter):
+        def iter_stale_items(self, head):
+            yield NS, "gone"
+
+    result = run_store_batch_upgrade(_AdHocAdapter(_GoneStore()), engine(), target="head")
+
+    assert result.total == 1 and result.migrated == 0
+
+
 def test_store_batch_downgrade_to_base_reverts_and_untags():
     raw = InMemoryStore()
     raw.put(NS, "a", {"count": 1})
@@ -207,3 +250,75 @@ def test_store_batch_downgrade_continue_on_error():
     assert not result.ok
     # The healthy item was still reverted despite the poisoned one failing.
     assert raw.get(NS, "ok").value == {"count": 1}
+
+
+def test_store_batch_downgrade_raises_on_error_by_default():
+    raw = InMemoryStore()
+    raw.put(NS, "ok", {"count": 1})
+    adapter = InMemoryStoreAdapter(raw)
+    run_store_batch_upgrade(adapter, engine(), target="head")
+    # Seed an already-upgraded poisoned item; its downgrade raises.
+    raw.put(NS, "bad", {"count": 2, "poison": True, "context": {}, REVISION_METADATA_KEY: "v1"})
+
+    with pytest.raises(ValueError, match="poisoned item"):
+        run_store_batch_downgrade(adapter, engine(), None)
+
+
+def test_store_batch_downgrade_raises_on_unknown_revision_by_default():
+    raw = InMemoryStore()
+    raw.put(NS, "a", {"count": 1, REVISION_METADATA_KEY: "v99"})  # tag absent from registry
+    adapter = InMemoryStoreAdapter(raw)
+
+    with pytest.raises(RevisionNotFoundError):
+        run_store_batch_downgrade(adapter, engine(), None)
+
+
+@pytest.mark.parametrize("policy", ["warn", "pass"])
+def test_store_batch_downgrade_skips_unknown_revision_under_policy(policy):
+    raw = InMemoryStore()
+    raw.put(NS, "a", {"count": 1, REVISION_METADATA_KEY: "v99"})
+    adapter = InMemoryStoreAdapter(raw)
+
+    result = run_store_batch_downgrade(adapter, engine(), None, on_unknown_revision=policy)
+
+    assert result.total == 1 and result.migrated == 0 and result.ok
+    assert raw.get(NS, "a").value[REVISION_METADATA_KEY] == "v99"  # left untouched
+
+
+def test_store_batch_downgrade_skips_missing_and_none_value_items():
+    # A store that returns None for one key (deleted between enumeration and
+    # fetch) and a None-valued Item for another (external/custom store). Both
+    # must be skipped, not crashed on.
+    raw = InMemoryStore()
+    raw.put(NS, "real", {"count": 1})
+    adapter = InMemoryStoreAdapter(raw)
+    run_store_batch_upgrade(adapter, engine(), target="head")
+
+    class _MixedStore(InMemoryStore):
+        def get(self, namespace, key, *, refresh_ttl=None):
+            if key == "gone":
+                return None
+            if key == "nullval":
+                return Item(
+                    namespace=tuple(namespace),
+                    key=key,
+                    value=None,
+                    created_at="2026-01-01T00:00:00+00:00",
+                    updated_at="2026-01-01T00:00:00+00:00",
+                )
+            return super().get(namespace, key, refresh_ttl=refresh_ttl)
+
+    mixed = _MixedStore()
+    mixed.put(NS, "real", raw.get(NS, "real").value)  # already-upgraded item
+
+    class _AdHocAdapter(InMemoryStoreAdapter):
+        def iter_all_items(self):
+            yield NS, "gone"
+            yield NS, "nullval"
+            yield NS, "real"
+
+    result = run_store_batch_downgrade(_AdHocAdapter(mixed), engine(), None)
+
+    assert result.total == 3  # all three enumerated
+    assert result.migrated == 1  # only the real item reverted; gone/nullval skipped
+    assert mixed.get(NS, "real").value == {"count": 1}

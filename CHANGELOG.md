@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.1] — 2026-06-14
 
 ### Fixed
 
@@ -61,11 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reconstructed as the **union of the schemas after each parent**, so a
   post-merge autogenerate sees the full pre-merge schema. Linear histories are
   unaffected (a revision's own snapshot, or the nearest ancestor's, is used).
-
-## [1.2.2] — 2026-06-14
-
-### Fixed
-
 - **`langmigrate stamp` / `langmigrate store stamp` now render an unknown
   revision as a clean error instead of a raw traceback.** The revision-exists
   validation called `registry.get(revision)` directly, so passing a revision id
@@ -74,11 +69,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which renders `LangMigrateError` as a single red line). Both `stamp` commands
   now go through a shared `_require_revision` helper that prints the message and
   exits 1 cleanly. No behavioural change beyond the error presentation.
-
-## [1.2.1] — 2026-06-13
-
-### Fixed
-
 - **`upgrade_state` to a target the state is already past is now a no-op
   instead of a crash.** `MigrationEngine.upgrade_state` to a pinned older
   `target` used to raise `RevisionNotAncestorError` when the state was already

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langmigrate"
-version = "1.2.2"
+version = "1.2.1"
 description = "Declarative schema migrations for LangGraph state persistence (checkpointers and stores)."
 readme = "README.md"
 license = { text = "MIT" }

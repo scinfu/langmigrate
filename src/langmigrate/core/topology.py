@@ -54,6 +54,14 @@ class NodeRemap:
         is_missing = node in self.removed or (known is not None and node not in known)
         if is_missing:
             if self.fallback is not None:
+                # The fallback must itself exist in the current graph — redirecting
+                # a stuck thread to a node that is also gone just moves the
+                # deadlock, the same reasoning that validates a rename target
+                # above. When ``known_nodes`` is supplied, a stale fallback is
+                # surfaced as a structured TopologyMismatchError rather than
+                # silently re-stranding the thread.
+                if known is not None and self.fallback not in known:
+                    raise TopologyMismatchError(self.fallback, known_nodes=sorted(known))
                 return self.fallback
             raise TopologyMismatchError(node, known_nodes=sorted(known) if known else None)
         return node

@@ -785,6 +785,43 @@ def test_noderemap_rename_to_valid_target_is_unaffected():
 # optional ``langchain`` AgentMiddleware base.
 
 
+# Bug #13: symmetric to Bug #11 — NodeRemap validated a rename *target* against
+# known_nodes but not the *fallback*. A stale fallback (pointing at a node that
+# was itself removed from the current graph) silently re-stranded the thread on a
+# nonexistent node, the exact deadlock the rename validation guards against. With
+# known_nodes supplied, the fallback is now validated too.
+
+
+def test_noderemap_fallback_to_missing_node_raises_when_known_nodes_given():
+    from langmigrate.core.topology import NodeRemap
+
+    remap = NodeRemap(removed=["gone"], fallback="also_gone")
+    with pytest.raises(TopologyMismatchError) as ei:
+        remap.resolve("gone", known_nodes={"a", "b"})
+    assert ei.value.node == "also_gone"
+
+
+def test_noderemap_unknown_node_redirected_to_missing_fallback_raises():
+    from langmigrate.core.topology import NodeRemap
+
+    # A node not in known_nodes is treated as removed; the fallback it would be
+    # redirected to is also absent from the current graph.
+    remap = NodeRemap(fallback="gone")
+    with pytest.raises(TopologyMismatchError) as ei:
+        remap.resolve("ghost", known_nodes={"entry", "step"})
+    assert ei.value.node == "gone"
+
+
+def test_noderemap_valid_fallback_is_unaffected():
+    from langmigrate.core.topology import NodeRemap
+
+    remap = NodeRemap(removed=["gone"], fallback="entry")
+    # Fallback exists in the current graph: redirected as before.
+    assert remap.resolve("gone", known_nodes={"entry", "step"}) == "entry"
+    # Without known_nodes, the fallback is not validated (unchanged behavior).
+    assert NodeRemap(removed=["gone"], fallback="also_gone").resolve("gone") == "also_gone"
+
+
 # -- shared helpers for the regression tests --------------------------------
 
 

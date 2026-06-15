@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`NodeRemap` now validates the `fallback` against `known_nodes` too.**
+  Symmetric to the rename-target check shipped in 1.2.1: a rename target was
+  validated, but the fallback was not. A stale fallback — pointing at a node that
+  was itself removed from the current graph — silently re-stranded an interrupted
+  thread on a non-existent node, the exact deadlock the remap exists to repair.
+  When `known_nodes` is supplied, an unknown fallback now raises a structured
+  `TopologyMismatchError` (the error names the missing fallback). Behaviour
+  without `known_nodes` is unchanged.
+
 ## [1.2.1] — 2026-06-14
 
 ### Fixed
